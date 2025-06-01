@@ -1,0 +1,16 @@
+{
+  "name": "journeygen",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "generate": "nodemon --watch scripts --exec \"node scripts/generateJournal.js\""
+  },
+  "dependencies": {
+    "dotenv": "^16.5.0",
+    "mongoose": "^8.15.1",
+    "openai": "^5.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
