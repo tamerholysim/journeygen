@@ -1,0 +1,85 @@
+
+npm run dev-server
+
+Navigate into the client folder:
+
+npm start
+
+How to Use
+Create a new journal
+Open http://localhost:3000 in your browser.
+You’ll see a form to enter:
+
+Journal Topic
+
+Background / Framework (optional)
+Click “Generate Journal.” The backend will create a new journal in MongoDB and return its ID. The UI will immediately switch to the journal view.
+
+View an existing journal
+Navigate to:
+
+bash
+Copy
+Edit
+http://localhost:3000/?id=<journalId>
+Replace <journalId> with the MongoDB ID (e.g. 683c4525bed7add4a4579335).
+
+Submit responses and generate a report
+In the journal view, fill out each prompt and click “Submit.” That will POST your answers to /api/journals/:id/report and display a GPT-generated report.
+
+Scripts Summary
+From the project root (journeygen/):
+
+npm run dev-server
+Starts the backend on port 3001.
+
+npm run generate
+(If you need to generate a journal from the command line)
+Watches scripts/ and runs node scripts/generateJournal.js "<Topic>".
+
+From the client folder (journeygen/client/):
+
+npm start
+Starts the React dev server on port 3000 (use NODE_OPTIONS=--openssl-legacy-provider npm start if you see OpenSSL errors).
+
+npm run build
+Builds a production bundle in client/build/.
+
+Troubleshooting
+MongoDB not running
+Make sure mongod is online. If installed via Homebrew:
+
+bash
+Copy
+Edit
+brew services start mongodb/brew/mongodb-community
+“Unsupported” OpenSSL error in React
+Add NODE_OPTIONS=--openssl-legacy-provider before npm start in client/package.json or run manually:
+
+bash
+Copy
+Edit
+NODE_OPTIONS=--openssl-legacy-provider npm start
+Environment variables not loading
+Ensure your .env is in the correct location:
+
+Backend .env → project root (journeygen/.env).
+
+Client generally doesn’t need its own .env unless you add custom env flags.
+
+Port conflicts
+
+Backend defaults to 3001.
+
+Frontend defaults to 3000.
+You can override via PORT in each .env if needed.
+
+Now you should be able to:
+
+Spin up MongoDB
+
+Start the backend (npm run dev-server)
+
+Start the frontend (cd client && npm start)
+
+…and create/view guided journals immediately.

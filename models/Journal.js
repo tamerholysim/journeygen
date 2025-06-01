@@ -1,3 +1,4 @@
+// models/Journal.js
 import mongoose from 'mongoose';
 
 const promptSchema = new mongoose.Schema({
@@ -19,8 +20,8 @@ const journalSchema = new mongoose.Schema({
   topic:           { type: String, required: true },
   title:           { type: String, required: true },
   description:     { type: String, required: true },
-  tableOfContents: [sectionSchema]
+  tableOfContents: [sectionSchema],
+  bookingLink:     { type: String, default: '' }    // ← add this line
 });
 
-const Journal = mongoose.model('Journal', journalSchema);
-export default Journal;
+export default mongoose.model('Journal', journalSchema);

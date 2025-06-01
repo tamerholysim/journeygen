@@ -8,19 +8,20 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dbConnect from './lib/dbConnect.js';
 import Journal from './models/Journal.js';
-import generateJournal from './lib/generateJournalService.js';
+import generateJournal from './lib/generateJournalService.js'; // our shared service
 import OpenAI from 'openai';
 
 const app = express();
 app.use(cors());
-app.use(express.json()); // parse JSON bodies
+app.use(express.json());
 
-// ——————————————————————————————————————————————
+
+// ——————————————
 // POST /api/journals
-// → Create a brand‐new journal from { topic, background } in request body
-// ——————————————————————————————————————————————
+// Create a new journal with { topic, background, bookingLink }
+// ——————————————
 app.post('/api/journals', async (req, res) => {
-  const { topic, background } = req.body;
+  const { topic, background, bookingLink } = req.body;
 
   if (!topic || typeof topic !== 'string') {
     return res.status(400).json({ error: 'Missing or invalid "topic".' });
@@ -28,30 +29,43 @@ app.post('/api/journals', async (req, res) => {
   if (background !== undefined && typeof background !== 'string') {
     return res.status(400).json({ error: '"background" must be a string if provided.' });
   }
+  if (bookingLink !== undefined && typeof bookingLink !== 'string') {
+    return res.status(400).json({ error: '"bookingLink" must be a string if provided.' });
+  }
 
   try {
-    const newJournal = await generateJournal({
-      topic: topic.trim(),
-      backgroundText: background.trim()
+    // 1) Generate & save the journal (topic + background):
+    //    generateJournal returns the saved Mongo document (without bookingLink yet)
+    const savedJournal = await generateJournal({
+      topic,
+      backgroundText: background || '',
+      bookingLink: '' // we’ll attach bookingLink in the next step
     });
 
-    return res.status(201).json(newJournal);
+    // 2) Now attach bookingLink (if provided) and update that same document:
+    const updated = await Journal.findByIdAndUpdate(
+      savedJournal._id,
+      { bookingLink: bookingLink || '' },
+      { new: true } // return the updated document
+    ).lean();
+
+    return res.status(201).json(updated);
   } catch (err) {
     console.error('Error in POST /api/journals:', err);
     return res.status(500).json({ error: 'Server error generating journal.' });
   }
 });
 
-// ——————————————————————————————————————————————
+
+// ——————————————
 // GET /api/journals/:id
-// → Fetch an existing journal by _id
-// ——————————————————————————————————————————————
+// Fetch existing journal by its MongoDB _id
+// ——————————————
 app.get('/api/journals/:id', async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
     return res.status(400).json({ error: 'Invalid journal ID format.' });
   }
-
   try {
     await dbConnect();
     const journal = await Journal.findById(id).lean();
@@ -65,10 +79,11 @@ app.get('/api/journals/:id', async (req, res) => {
   }
 });
 
-// ——————————————————————————————————————————————
+
+// ——————————————
 // POST /api/journals/:id/report
-// → Generate a “report” given user responses; includes Holy Sim background
-// ——————————————————————————————————————————————
+// Generate a “report” from user responses, prepending Holy Sim background
+// ——————————————
 app.post('/api/journals/:id/report', async (req, res) => {
   const { id } = req.params;
   const { responses } = req.body;
@@ -81,7 +96,7 @@ app.post('/api/journals/:id/report', async (req, res) => {
   }
 
   try {
-    // 1) Read Background.txt from disk (if it exists)
+    // 1) Read lib/Background.txt if it exists
     let backgroundText = '';
     try {
       const __filename = fileURLToPath(import.meta.url);
@@ -100,18 +115,20 @@ app.post('/api/journals/:id/report', async (req, res) => {
       return res.status(404).json({ error: 'Journal not found.' });
     }
 
-    // 3) Build GPT prompt (prepend background if any)
+    // 3) Build the GPT prompt (prepend backgroundText if present)
     let promptText = '';
     if (backgroundText.trim()) {
       promptText += backgroundText.trim() + '\n\n';
     }
     promptText += `
-You are a coach’s assistant using the framework in your background text. Based on the following guided journal, generate a personalized report with suggestions, insights, and next steps for the user, all from within that framework.
+You are a coach’s assistant using the Holy Sim framework above. 
+Based on the following guided journal, generate a personalized report with suggestions, insights, and next steps for the user, all from within that framework.
 
 Journal Title: ${journal.title}
 Journal Description: ${journal.description}
 
 `;
+
     journal.tableOfContents.forEach((section, secIdx) => {
       promptText += `---\nSection (${section.entryType}): ${section.title}\n`;
       promptText += `Content: ${section.content}\n`;
@@ -127,9 +144,10 @@ Journal Description: ${journal.description}
       });
       promptText += `\n`;
     });
+
     promptText += `---\nNow provide a cohesive report for the user: highlight strengths, offer constructive feedback, and suggest next steps based on their responses.\n\nReport:\n`;
 
-    // 4) Call OpenAI for report
+    // 4) Call OpenAI to generate the report
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const completion = await openai.chat.completions.create({
       model: 'gpt-4-0613',
@@ -145,7 +163,6 @@ Journal Description: ${journal.description}
     if (!gptMessage) {
       return res.status(500).json({ error: 'GPT did not return a report.' });
     }
-
     return res.json({ report: gptMessage });
   } catch (err) {
     console.error(err);

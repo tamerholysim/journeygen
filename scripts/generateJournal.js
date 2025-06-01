@@ -1,4 +1,3 @@
-// lib/generateJournalService.js
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -6,7 +5,7 @@ import OpenAI from 'openai';
 import dbConnect from './dbConnect.js';
 import Journal from '../models/Journal.js';
 
-async function generateJournal({ topic, backgroundText = '' }) {
+async function generateJournal({ topic, backgroundText = '', bookingLink = '' }) {
   if (!topic || typeof topic !== 'string') {
     throw new Error('Must supply a non‐empty string for "topic".');
   }
@@ -17,7 +16,7 @@ async function generateJournal({ topic, backgroundText = '' }) {
   // 2) Initialize OpenAI client
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-  // 3) If no backgroundText was passed, try loading lib/Background.txt
+  // 3) Determine finalBackground (either passed-in or load from file)
   let finalBackground = '';
   if (backgroundText.trim()) {
     finalBackground = backgroundText.trim();
@@ -27,14 +26,14 @@ async function generateJournal({ topic, backgroundText = '' }) {
       const __dirname = path.dirname(__filename);
       const bgPath = path.resolve(__dirname, 'Background.txt');
       await fs.access(bgPath);
-      finalBackground = (await fs.readFile(bgPath, 'utf-8')).trim();
+      const fileContents = await fs.readFile(bgPath, 'utf-8');
+      finalBackground = fileContents.trim();
     } catch {
-      // No Background.txt on disk → proceed without it
       finalBackground = '';
     }
   }
 
-  // 4) Build system prompt (prepend full background if present)
+  // 4) Build systemPrompt (prepend background if present)
   let systemPrompt = '';
   if (finalBackground) {
     systemPrompt += finalBackground + '\n\n';
@@ -60,7 +59,7 @@ Return a single valid JSON object with keys:
 If you cannot generate the full structure, return a refusal JSON like {"error": "Unable to generate complete journal."}.
 `.trim();
 
-  // 5) Call the chat endpoint with max_tokens: 4000
+  // 5) Call GPT-4 with max_tokens: 4000
   const completion = await openai.chat.completions.create({
     model: 'gpt-4-0613',
     messages: [
@@ -75,7 +74,7 @@ If you cannot generate the full structure, return a refusal JSON like {"error": 
     throw new Error('GPT did not return any content.');
   }
 
-  // 6) Parse the returned JSON
+  // 6) Parse GPT’s JSON
   let parsedContent;
   try {
     parsedContent = JSON.parse(msg.content);
@@ -110,16 +109,17 @@ If you cannot generate the full structure, return a refusal JSON like {"error": 
     });
   }
 
-  // 9) Save to MongoDB
+  // 9) Save to MongoDB (including bookingLink)
   const doc = new Journal({
     topic,
     title,
     description,
+    bookingLink: bookingLink || '',
     tableOfContents: tableOfContents.map(entry => ({
       entryType: entry.entryType,
-      title: entry.title,
-      content: entry.content || '',
-      prompts: (entry.prompts || []).map(p => ({ text: p.text }))
+      title:     entry.title,
+      content:   entry.content || '',
+      prompts:   (entry.prompts || []).map(p => ({ text: p.text }))
     }))
   });
 

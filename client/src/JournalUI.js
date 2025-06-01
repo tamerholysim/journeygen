@@ -1,9 +1,10 @@
 // client/src/JournalUI.js
 import React, { useState, useEffect } from 'react';
+import jsPDF from 'jspdf';
 
 export default function JournalUI({ journalId }) {
   const [journal, setJournal] = useState(null);
-  // currentIndex = 0 → Overview; 1..N → sections; N+1 → Report
+  // 0 = Overview; 1..N = each section; N+1 = Report
   const [currentIndex, setCurrentIndex] = useState(0);
 
   // responses[sectionIdx][promptIdx]
@@ -24,7 +25,7 @@ export default function JournalUI({ journalId }) {
       })
       .then((data) => {
         setJournal(data);
-        // Initialize one subarray per section
+        // Initialize one empty string per prompt
         const initial = data.tableOfContents.map((section) =>
           section.prompts.map(() => '')
         );
@@ -66,7 +67,7 @@ export default function JournalUI({ journalId }) {
       })
       .then((data) => {
         setReport(data.report);
-        // Jump to Report pane, index = 1 + number of sections
+        // Jump to Report pane: index = 1 + number of sections
         setCurrentIndex(1 + journal.tableOfContents.length);
       })
       .catch((err) => {
@@ -81,7 +82,7 @@ export default function JournalUI({ journalId }) {
   if (!journal) {
     return (
       <div style={{ padding: '2rem', textAlign: 'center' }}>
-        <h3>Loading journal...</h3>
+        <h3>Loading journal…</h3>
       </div>
     );
   }
@@ -98,6 +99,120 @@ export default function JournalUI({ journalId }) {
   const isOverview = currentIndex === 0;
   const isReport = report && currentIndex === numSections + 1;
   const sectionIndex = !isOverview && !isReport ? currentIndex - 1 : null;
+
+  // Ensure full URL (add https:// if missing)
+  const normalizeLink = (raw) => {
+    if (!raw) return '';
+    if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+    return 'https://' + raw;
+  };
+
+  // Generate and download PDF
+  const handleSavePDF = () => {
+    const doc = new jsPDF();
+    const leftMargin = 20;
+    let yPos = 20;
+    const lineHeight = 10;
+    const pageHeight = doc.internal.pageSize.height;
+
+    // 1) Title
+    doc.setFontSize(16);
+    doc.text(journal.title, leftMargin, yPos);
+    yPos += lineHeight + 2;
+
+    // 2) Description
+    doc.setFontSize(12);
+    const descLines = doc.splitTextToSize(journal.description, 170);
+    descLines.forEach((line) => {
+      if (yPos + lineHeight > pageHeight - 20) {
+        doc.addPage();
+        yPos = 20;
+      }
+      doc.text(line, leftMargin, yPos);
+      yPos += lineHeight;
+    });
+    yPos += lineHeight;
+
+    // 3) Iterate through each section: prompts & responses
+    journal.tableOfContents.forEach((section, secIdx) => {
+      if (yPos + lineHeight > pageHeight - 20) {
+        doc.addPage();
+        yPos = 20;
+      }
+      doc.setFontSize(14);
+      doc.text(`${section.entryType}: ${section.title}`, leftMargin, yPos);
+      yPos += lineHeight;
+
+      doc.setFontSize(12);
+      // Section content (optional to include, but we'll skip long content to focus on prompts)
+      // You can uncomment if you want to include the explanatory content itself:
+      /*
+      const contentLines = doc.splitTextToSize(section.content, 170);
+      contentLines.forEach(line => {
+        if (yPos + lineHeight > pageHeight - 20) {
+          doc.addPage();
+          yPos = 20;
+        }
+        doc.text(line, leftMargin, yPos);
+        yPos += lineHeight;
+      });
+      yPos += lineHeight;
+      */
+
+      // Prompts and user’s answers
+      section.prompts.forEach((pObj, pIdx) => {
+        // Prompt text
+        const promptLines = doc.splitTextToSize(`• ${pObj.text}`, 165);
+        promptLines.forEach((line) => {
+          if (yPos + lineHeight > pageHeight - 20) {
+            doc.addPage();
+            yPos = 20;
+          }
+          doc.text(line, leftMargin + 5, yPos);
+          yPos += lineHeight;
+        });
+
+        // Response text
+        const userAnswer = (responses[secIdx] && responses[secIdx][pIdx]) || '';
+        const answerLabel = `   → ${userAnswer || '[no response]'}`;
+        const answerLines = doc.splitTextToSize(answerLabel, 165);
+        answerLines.forEach((line) => {
+          if (yPos + lineHeight > pageHeight - 20) {
+            doc.addPage();
+            yPos = 20;
+          }
+          doc.text(line, leftMargin + 10, yPos);
+          yPos += lineHeight;
+        });
+        yPos += 2;
+      });
+
+      yPos += lineHeight;
+    });
+
+    // 4) Add the “Report” section
+    if (yPos + lineHeight > pageHeight - 20) {
+      doc.addPage();
+      yPos = 20;
+    }
+    doc.setFontSize(14);
+    doc.text('Final Report:', leftMargin, yPos);
+    yPos += lineHeight;
+
+    doc.setFontSize(12);
+    const reportLines = doc.splitTextToSize(report || '', 170);
+    reportLines.forEach((line) => {
+      if (yPos + lineHeight > pageHeight - 20) {
+        doc.addPage();
+        yPos = 20;
+      }
+      doc.text(line, leftMargin, yPos);
+      yPos += lineHeight;
+    });
+
+    // 5) Save
+    doc.save(`${journal.title}.pdf`);
+  };
 
   return (
     <div style={{ display: 'flex', height: '100vh' }}>
@@ -135,7 +250,8 @@ export default function JournalUI({ journalId }) {
               padding: '0.5rem',
               marginBottom: '0.25rem',
               cursor: 'pointer',
-              backgroundColor: currentIndex === idx + 1 ? '#f0f8ff' : 'transparent',
+              backgroundColor:
+                currentIndex === idx + 1 ? '#f0f8ff' : 'transparent',
               borderRadius: '4px'
             }}
           >
@@ -290,6 +406,47 @@ export default function JournalUI({ journalId }) {
               }}
             >
               {report}
+            </div>
+
+            {/* “Get Consultation” Button */}
+            {journal.bookingLink && (
+              <div style={{ marginTop: '2rem', textAlign: 'center' }}>
+                <a
+                  href={normalizeLink(journal.bookingLink)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    display: 'inline-block',
+                    backgroundColor: '#007BFF',
+                    color: '#fff',
+                    padding: '0.75rem 1.5rem',
+                    textDecoration: 'none',
+                    borderRadius: '4px',
+                    fontSize: '1rem',
+                    marginBottom: '1rem'
+                  }}
+                >
+                  Get Consultation
+                </a>
+              </div>
+            )}
+
+            {/* “Save PDF” Button */}
+            <div style={{ marginTop: '1rem', textAlign: 'center' }}>
+              <button
+                onClick={handleSavePDF}
+                style={{
+                  padding: '0.75rem 1.5rem',
+                  backgroundColor: '#28a745',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: '1rem'
+                }}
+              >
+                Save PDF
+              </button>
             </div>
           </>
         )}

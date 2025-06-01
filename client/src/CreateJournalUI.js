@@ -1,10 +1,10 @@
-// client/src/CreateJournalUI.js
 import React, { useState } from 'react';
 import JournalUI from './JournalUI';
 
 export default function CreateJournalUI() {
   const [topic, setTopic] = useState('');
   const [background, setBackground] = useState('');
+  const [bookingLink, setBookingLink] = useState('');        // ← NEW
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState(null);
   const [newJournalId, setNewJournalId] = useState(null);
@@ -23,7 +23,11 @@ export default function CreateJournalUI() {
       const res = await fetch('/api/journals', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ topic: topic.trim(), background: background.trim() })
+        body: JSON.stringify({
+          topic:      topic.trim(),
+          background: background.trim(),
+          bookingLink: bookingLink.trim()             // ← NEW
+        })
       });
 
       if (!res.ok) {
@@ -40,12 +44,11 @@ export default function CreateJournalUI() {
     }
   }
 
-  // If a new journal was just created, show JournalUI immediately:
+  // Show the newly‐created journal immediately
   if (newJournalId) {
     return <JournalUI journalId={newJournalId} />;
   }
 
-  // Otherwise, show the “Create” form:
   return (
     <div style={{ maxWidth: 600, margin: '2rem auto', padding: '0 1rem' }}>
       <h2>Create a New Guided Journal</h2>
@@ -63,16 +66,29 @@ export default function CreateJournalUI() {
             style={{ width: '100%', padding: '0.5rem' }}
           />
         </label>
+
         <label>
           <strong>Background / Framework</strong><br />
           <textarea
             value={background}
             onChange={(e) => setBackground(e.target.value)}
-            placeholder="Paste your own background/framework text here (e.g. Holy Sim…) or leave blank to use the default."
-            rows={8}
+            placeholder="Paste your own background/framework text here… or leave blank to use default."
+            rows={6}
             style={{ width: '100%', padding: '0.5rem', fontFamily: 'monospace' }}
           />
         </label>
+
+        <label>
+          <strong>Booking Link</strong><br />
+          <input
+            type="text"
+            value={bookingLink}
+            onChange={(e) => setBookingLink(e.target.value)}
+            placeholder="https://coach.example.com/booking/your‐name"
+            style={{ width: '100%', padding: '0.5rem' }}
+          />
+        </label>
+
         <button type="submit" disabled={isSubmitting} style={{ padding: '0.75rem' }}>
           {isSubmitting ? 'Generating…' : 'Generate Journal'}
         </button>
