@@ -3,13 +3,19 @@ import React, { useState, useEffect } from 'react';
 
 export default function JournalUI({ journalId }) {
   const [journal, setJournal] = useState(null);
-  // We’ll call currentIndex = 0 “Overview”; indices 1..N correspond to tableOfContents[0..N-1]
+  // currentIndex = 0 → Overview; 1..N → sections; N+1 → Report
   const [currentIndex, setCurrentIndex] = useState(0);
-  // responses[sectionIndex][promptIndex] will now be 0-based for actual sections only.
+
+  // responses[sectionIdx][promptIdx]
   const [responses, setResponses] = useState([]);
 
+  // Report state
+  const [report, setReport] = useState(null);
+  const [loadingReport, setLoadingReport] = useState(false);
+  const [reportError, setReportError] = useState(null);
+
+  // Fetch journal on mount
   useEffect(() => {
-    // Fetch the journal from backend
     const apiUrl = process.env.REACT_APP_API_URL || '';
     fetch(`${apiUrl}/api/journals/${journalId}`)
       .then((res) => {
@@ -18,7 +24,7 @@ export default function JournalUI({ journalId }) {
       })
       .then((data) => {
         setJournal(data);
-        // Initialize responses only for actual sections (tableOfContents)
+        // Initialize one subarray per section
         const initial = data.tableOfContents.map((section) =>
           section.prompts.map(() => '')
         );
@@ -30,18 +36,46 @@ export default function JournalUI({ journalId }) {
       });
   }, [journalId]);
 
-  const handlePromptChange = (sectionIdx, promptIdx, text) => {
+  const handlePromptChange = (secIdx, promptIdx, text) => {
     setResponses((prev) => {
       const copy = prev.map((arr) => [...arr]);
-      copy[sectionIdx][promptIdx] = text;
+      copy[secIdx][promptIdx] = text;
       return copy;
     });
   };
 
   const handleSubmit = () => {
-    // For now, just log responses. Later you can POST these to the server.
-    console.log('User Responses:', responses);
-    alert('Responses logged to console. (Add submit logic later.)');
+    if (!journal) return;
+
+    setLoadingReport(true);
+    setReportError(null);
+
+    const apiUrl = process.env.REACT_APP_API_URL || '';
+    fetch(`${apiUrl}/api/journals/${journalId}/report`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ responses })
+    })
+      .then((res) => {
+        if (!res.ok) {
+          return res.json().then((body) => {
+            throw new Error(body.error || 'Unknown error');
+          });
+        }
+        return res.json();
+      })
+      .then((data) => {
+        setReport(data.report);
+        // Jump to Report pane, index = 1 + number of sections
+        setCurrentIndex(1 + journal.tableOfContents.length);
+      })
+      .catch((err) => {
+        console.error(err);
+        setReportError(err.message);
+      })
+      .finally(() => {
+        setLoadingReport(false);
+      });
   };
 
   if (!journal) {
@@ -60,14 +94,10 @@ export default function JournalUI({ journalId }) {
     );
   }
 
-  // totalItems = 1 (Overview) + journal.tableOfContents.length
-  const totalItems = 1 + journal.tableOfContents.length;
+  const numSections = journal.tableOfContents.length;
   const isOverview = currentIndex === 0;
-  const isLast = currentIndex === totalItems - 1; // last index = final section/closing
-
-  // If not overview, map back to journal sections:
-  const section =
-    !isOverview && journal.tableOfContents[currentIndex - 1];
+  const isReport = report && currentIndex === numSections + 1;
+  const sectionIndex = !isOverview && !isReport ? currentIndex - 1 : null;
 
   return (
     <div style={{ display: 'flex', height: '100vh' }}>
@@ -77,44 +107,59 @@ export default function JournalUI({ journalId }) {
           width: '260px',
           borderRight: '1px solid #ddd',
           padding: '1rem',
-          overflowY: 'auto',
+          overflowY: 'auto'
         }}
       >
         <h3 style={{ marginTop: 0 }}>Contents</h3>
-        {/* Overview entry */}
+
+        {/* Overview */}
         <div
           onClick={() => setCurrentIndex(0)}
           style={{
             padding: '0.5rem',
             marginBottom: '0.25rem',
             cursor: 'pointer',
-            backgroundColor: isOverview ? '#f0f8ff' : 'transparent',
-            borderRadius: '4px',
-            fontWeight: 'bold',
+            backgroundColor: currentIndex === 0 ? '#f0f8ff' : 'transparent',
+            borderRadius: '4px'
           }}
         >
           Overview
         </div>
-        {/* Each section in the journal */}
-        {journal.tableOfContents.map((sec, idx) => {
-          const sidebarIndex = idx + 1; // because Overview = 0
-          return (
-            <div
-              key={idx}
-              onClick={() => setCurrentIndex(sidebarIndex)}
-              style={{
-                padding: '0.5rem',
-                marginBottom: '0.25rem',
-                cursor: 'pointer',
-                backgroundColor:
-                  currentIndex === sidebarIndex ? '#f0f8ff' : 'transparent',
-                borderRadius: '4px',
-              }}
-            >
-              {sec.title}
-            </div>
-          );
-        })}
+
+        {/* Sections */}
+        {journal.tableOfContents.map((sec, idx) => (
+          <div
+            key={idx}
+            onClick={() => setCurrentIndex(idx + 1)}
+            style={{
+              padding: '0.5rem',
+              marginBottom: '0.25rem',
+              cursor: 'pointer',
+              backgroundColor: currentIndex === idx + 1 ? '#f0f8ff' : 'transparent',
+              borderRadius: '4px'
+            }}
+          >
+            {sec.title}
+          </div>
+        ))}
+
+        {/* Report (if generated) */}
+        {report && (
+          <div
+            onClick={() => setCurrentIndex(numSections + 1)}
+            style={{
+              padding: '0.5rem',
+              marginTop: '1rem',
+              borderTop: '1px solid #ccc',
+              cursor: 'pointer',
+              backgroundColor:
+                currentIndex === numSections + 1 ? '#f0f8ff' : 'transparent',
+              borderRadius: '4px'
+            }}
+          >
+            Report
+          </div>
+        )}
       </div>
 
       {/* Main Pane */}
@@ -122,19 +167,15 @@ export default function JournalUI({ journalId }) {
         style={{
           flex: 1,
           padding: '2rem',
-          overflowY: 'auto',
+          overflowY: 'auto'
         }}
       >
-        {isOverview ? (
-          // Overview: show journal title + description
+        {isOverview && (
           <>
-            <h1 style={{ marginBottom: '0.5rem' }}>{journal.title}</h1>
-            <div style={{ marginBottom: '2rem', lineHeight: 1.6 }}>
-              {journal.description.split('\n').map((para, i) => (
-                <p key={i}>{para.trim()}</p>
-              ))}
-            </div>
-            {/* Next button jumps to first section */}
+            <h1>{journal.title}</h1>
+            <p style={{ lineHeight: 1.6, marginBottom: '2rem' }}>
+              {journal.description}
+            </p>
             <button
               onClick={() => setCurrentIndex(1)}
               style={{
@@ -144,56 +185,59 @@ export default function JournalUI({ journalId }) {
                 border: 'none',
                 borderRadius: '4px',
                 cursor: 'pointer',
-                fontSize: '1rem',
+                fontSize: '1rem'
               }}
             >
               Start Journal
             </button>
           </>
-        ) : (
-          // A real section (currentIndex >= 1)
+        )}
+
+        {!isOverview && !isReport && sectionIndex !== null && (
           <>
-            <h2>{section.title}</h2>
+            <h2>{journal.tableOfContents[sectionIndex].title}</h2>
             <div style={{ marginBottom: '1.5rem' }}>
-              {section.content.split('\n').map((para, i) => (
-                <p key={i} style={{ lineHeight: 1.6 }}>
-                  {para.trim()}
-                </p>
-              ))}
+              {journal.tableOfContents[sectionIndex].content
+                .split('\n')
+                .map((para, i) => (
+                  <p key={i} style={{ lineHeight: 1.6 }}>
+                    {para.trim()}
+                  </p>
+                ))}
             </div>
 
-            {section.prompts.map((pObj, pIdx) => (
-              <div key={pIdx} style={{ marginBottom: '1.25rem' }}>
-                <label
-                  style={{
-                    fontWeight: '500',
-                    display: 'block',
-                    marginBottom: '0.5rem',
-                  }}
-                >
-                  {pObj.text}
-                </label>
-                <textarea
-                  style={{
-                    width: '100%',
-                    minHeight: '60px',
-                    padding: '0.5rem',
-                    borderRadius: '4px',
-                    border: '1px solid #ccc',
-                    fontSize: '1rem',
-                  }}
-                  value={
-                    responses[currentIndex - 1]?.[pIdx] || ''
-                  }
-                  onChange={(e) =>
-                    handlePromptChange(currentIndex - 1, pIdx, e.target.value)
-                  }
-                />
-              </div>
-            ))}
+            {journal.tableOfContents[sectionIndex].prompts.map(
+              (pObj, pIdx) => (
+                <div key={pIdx} style={{ marginBottom: '1.25rem' }}>
+                  <label
+                    style={{
+                      fontWeight: '500',
+                      display: 'block',
+                      marginBottom: '0.5rem'
+                    }}
+                  >
+                    {pObj.text}
+                  </label>
+                  <textarea
+                    style={{
+                      width: '100%',
+                      minHeight: '60px',
+                      padding: '0.5rem',
+                      borderRadius: '4px',
+                      border: '1px solid #ccc',
+                      fontSize: '1rem'
+                    }}
+                    value={responses[sectionIndex][pIdx] || ''}
+                    onChange={(e) =>
+                      handlePromptChange(sectionIndex, pIdx, e.target.value)
+                    }
+                  />
+                </div>
+              )
+            )}
 
             <div style={{ marginTop: '2rem' }}>
-              {!isLast ? (
+              {sectionIndex < numSections - 1 ? (
                 <button
                   onClick={() => setCurrentIndex((ci) => ci + 1)}
                   style={{
@@ -203,7 +247,7 @@ export default function JournalUI({ journalId }) {
                     border: 'none',
                     borderRadius: '4px',
                     cursor: 'pointer',
-                    fontSize: '1rem',
+                    fontSize: '1rem'
                   }}
                 >
                   Next
@@ -211,19 +255,41 @@ export default function JournalUI({ journalId }) {
               ) : (
                 <button
                   onClick={handleSubmit}
+                  disabled={loadingReport}
                   style={{
                     padding: '0.75rem 1.5rem',
-                    backgroundColor: '#28a745',
+                    backgroundColor: loadingReport ? '#999' : '#28a745',
                     color: '#fff',
                     border: 'none',
                     borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '1rem',
+                    cursor: loadingReport ? 'default' : 'pointer',
+                    fontSize: '1rem'
                   }}
                 >
-                  Submit
+                  {loadingReport ? 'Generating Report…' : 'Submit'}
                 </button>
               )}
+            </div>
+
+            {reportError && (
+              <p style={{ color: 'red', marginTop: '1rem' }}>
+                Error generating report: {reportError}
+              </p>
+            )}
+          </>
+        )}
+
+        {isReport && (
+          <>
+            <h1>Report</h1>
+            <div
+              style={{
+                marginTop: '1rem',
+                whiteSpace: 'pre-wrap',
+                lineHeight: 1.6
+              }}
+            >
+              {report}
             </div>
           </>
         )}
