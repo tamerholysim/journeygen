@@ -1,4 +1,4 @@
-// client/src/Dashboard.js
+// client/src/Dashboard.js (admin)
 import React from 'react';
 
 /**

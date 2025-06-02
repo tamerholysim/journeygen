@@ -398,10 +398,11 @@ export default function JournalUI({ journalId, apiUrl, authHeader }) {
             <div
               style={{
                 marginTop: '1rem',
-                whiteSpace: 'pre-wrap',
-                lineHeight: 1.6
+                lineHeight: 1.6,
+                whiteSpace: 'pre-wrap'
               }}
             >
+              {/* Plain‐text rendering of the report */}
               {report}
             </div>
 
