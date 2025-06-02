@@ -1,4 +1,3 @@
-// server.js
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -10,7 +9,7 @@ import { fileURLToPath } from 'url';
 
 import dbConnect from './lib/dbConnect.js';
 import generateJournal from './lib/generateJournalService.js';
-import OpenAI from 'openai';         // ← We need this import for the report endpoint
+import OpenAI from 'openai'; // ← needed for the report endpoint
 
 // Models
 import User from './models/User.js';
@@ -60,8 +59,8 @@ seedAdminUser().catch(console.error);
 // ─── MULTER SETUP FOR FILE UPLOADS ─────────────────────────────────────────────
 //
 const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
-const uploadDir  = path.resolve(__dirname, 'uploads');
+const __dirname = path.dirname(__filename);
+const uploadDir = path.resolve(__dirname, 'uploads');
 
 // Ensure the uploads directory exists
 ;(async () => {
@@ -109,7 +108,7 @@ app.post(
     try {
       await dbConnect();
       const saved = await KnowledgeDoc.create({
-        name:       docName,
+        name: docName,
         fileUrl,
         uploadedAt: new Date()
       });
@@ -157,7 +156,9 @@ app.delete('/api/knowledge/:id', requireAdmin, async (req, res) => {
     const localFilePath = path.resolve(__dirname, doc.fileUrl.replace(/^\//, ''));
     try {
       await fs.unlink(localFilePath);
-    } catch { /* ignore missing file */ }
+    } catch {
+      /* ignore missing file */
+    }
     await doc.deleteOne();
     return res.json({ success: true });
   } catch (err) {
@@ -191,25 +192,27 @@ app.post(
         background
       } = req.body;
       if (!firstName || !lastName || !email) {
-        return res.status(400).json({ error: 'firstName, lastName, and email are required.' });
+        return res
+          .status(400)
+          .json({ error: 'firstName, lastName, and email are required.' });
       }
 
       const newClientData = {
-        firstName:   firstName.trim(),
-        lastName:    lastName.trim(),
-        email:       email.trim(),
-        gender:      gender || 'Other',
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        email: email.trim(),
+        gender: gender || 'Other',
         dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
-        background:  background || ''
+        background: background || ''
       };
 
       if (req.file) {
         newClientData.fileUploads = [
           {
             filename: req.file.filename,
-            path:     `/uploads/${req.file.filename}`,
+            path: `/uploads/${req.file.filename}`,
             mimetype: req.file.mimetype,
-            size:     req.file.size
+            size: req.file.size
           }
         ];
       }
@@ -232,9 +235,7 @@ app.post(
 app.get('/api/clients', requireAdmin, async (req, res) => {
   try {
     await dbConnect();
-    const all = await Client.find()
-      .sort({ lastName: 1, firstName: 1 })
-      .lean();
+    const all = await Client.find().sort({ lastName: 1, firstName: 1 }).lean();
     return res.json(all);
   } catch (err) {
     console.error('Error in GET /api/clients:', err);
@@ -377,9 +378,9 @@ app.post('/api/journals', requireAdmin, async (req, res) => {
     const savedJournal = await generateJournal({
       topic,
       backgroundText: background || '',
-      bookingLink:    '',               // placeholder
-      ownerId:        adminUser._id.toString(),
-      clientId:       client._id.toString()
+      bookingLink: '',
+      ownerId: adminUser._id.toString(),
+      clientId: client._id.toString()
     });
 
     // Update that saved journal to set bookingLink
@@ -546,9 +547,8 @@ app.post('/api/journals/:id/report', async (req, res) => {
 
     // 1) ADMIN: allowed on any journal
     if (username === 'admin' && password === 'pass') {
-      // proceed below to build prompt & call OpenAI
-    }
-    else {
+      // proceed to GPT
+    } else {
       // 2) CLIENT: must match journal.clientId
       if (!username.includes('@') || password !== 'pass') {
         return res.status(403).json({ error: 'Invalid credentials' });
@@ -565,42 +565,90 @@ app.post('/api/journals/:id/report', async (req, res) => {
       if (journal.clientId.toString() !== client._id.toString()) {
         return res.status(403).json({ error: 'Forbidden' });
       }
-      // allowed—fall through to GPT-step below
+      // allowed — fall through to GPT portion
     }
 
-    // ─── Build the GPT prompt (same logic as before) ──────────────────────
+    // ─── Build the GPT prompt with Knowledge Bank + Client info ──────────────
 
-    // 1) Try to read Background.txt from disk (optional)
-    let backgroundText = '';
-    try {
-      const __filename = fileURLToPath(import.meta.url);
-      const __dirname  = path.dirname(__filename);
-      const bgPath     = path.resolve(__dirname, 'lib/Background.txt');
-      await fs.access(bgPath);
-      backgroundText = await fs.readFile(bgPath, 'utf-8');
-    } catch {
-      backgroundText = '';
-    }
-
-    // 2) Fetch the journal (again, because an admin might want to report on an old one)
+    // 1) Fetch the journal again (to ensure we have it)
     const journal = await Journal.findById(id).lean();
     if (!journal) {
       return res.status(404).json({ error: 'Journal not found.' });
     }
 
-    // 3) Build the full prompt text
-    let promptText = '';
-    if (backgroundText.trim()) {
-      promptText += backgroundText.trim() + '\n\n';
+    // 2) Fetch the client record (to get name + background)
+    const client = await Client.findById(journal.clientId).lean();
+    if (!client) {
+      return res.status(404).json({ error: 'Client not found.' });
     }
-    promptText += `
-You are a coach’s assistant using the Holy Sim framework above.
-Based on the following guided journal, generate a personalized report with suggestions, insights, and next steps for the user, all from within that framework.
+    const clientName = `${client.firstName} ${client.lastName}`;
+    const clientBackground = client.background || '';
 
-Journal Title: ${journal.title}
-Journal Description: ${journal.description}
+    // 3) Load all KnowledgeDoc entries from MongoDB
+    const allDocs = await KnowledgeDoc.find().sort({ uploadedAt: -1 }).lean();
+    let knowledgeBankText = '';
+    const MAX_PER_DOC_CHARS = 2000;
 
-`;
+    for (const doc of allDocs) {
+      try {
+        // fileUrl is stored like "/uploads/1234567890-someFile.txt"
+        const rawPath = doc.fileUrl.replace(/^\//, '');
+        const diskPath = path.resolve(
+          path.dirname(fileURLToPath(import.meta.url)),
+          '..',
+          rawPath
+        );
+
+        let text = await fs.readFile(diskPath, 'utf-8');
+        console.log(`→ Reading KnowledgeDoc from disk: ${diskPath} (length ${text.length} chars)`);
+
+        if (text.length > MAX_PER_DOC_CHARS) {
+          text = text.slice(0, MAX_PER_DOC_CHARS) + '\n\n[...truncated]';
+        }
+        knowledgeBankText += `\n\n=== ${doc.name} ===\n${text.trim()}`;
+      } catch (readErr) {
+        console.warn(`Could not read KnowledgeDoc [${doc._id}]: ${readErr.message}`);
+        continue;
+      }
+    }
+
+    // 4) Fallback to static Background.txt if no KnowledgeDocs found
+    let fallbackBackground = '';
+    if (!knowledgeBankText.trim()) {
+      try {
+        const __filename = fileURLToPath(import.meta.url);
+        const __dirname = path.dirname(__filename);
+        const bgPath = path.resolve(__dirname, 'lib/Background.txt');
+        await fs.access(bgPath);
+        fallbackBackground = (await fs.readFile(bgPath, 'utf-8')).trim();
+      } catch {
+        fallbackBackground = '';
+      }
+    }
+
+    // 5) Build the “system” prompt
+    let systemPrompt = '';
+    if (knowledgeBankText.trim()) {
+      systemPrompt += `Knowledge Bank Documents:${knowledgeBankText}\n\n`;
+    } else if (fallbackBackground.trim()) {
+      systemPrompt += fallbackBackground + '\n\n';
+    }
+
+    // 6) Inject the client’s information
+    systemPrompt += `Client Name: ${clientName}\n`;
+    if (clientBackground.trim()) {
+      systemPrompt += `Client Background: ${clientBackground.trim()}\n\n`;
+    }
+
+    systemPrompt += `
+You are a coach’s assistant using the Holy Sim framework. Based on the guided journal below (which was created specifically for ${clientName}), generate a personalized report with suggestions, insights, and next steps for the user. Include any relevant context from the knowledge bank and the client’s background in your response.
+`.trim() + '\n\n';
+
+    // 7) Append the journal’s sections and user answers
+    let promptText = systemPrompt;
+    promptText += `Journal Title: ${journal.title}\n`;
+    promptText += `Journal Description: ${journal.description}\n\n`;
+
     journal.tableOfContents.forEach((section, secIdx) => {
       promptText += `---\nSection (${section.entryType}): ${section.title}\n`;
       promptText += `Content: ${section.content}\n`;
@@ -616,17 +664,18 @@ Journal Description: ${journal.description}
       });
       promptText += `\n`;
     });
-    promptText += `---\nNow provide a cohesive report for the user: highlight strengths, offer constructive feedback, and suggest next steps based on their responses.\n\nReport:\n`;
 
-    // 4) Call OpenAI
-    const openai     = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    promptText += `---\nNow provide a cohesive report for ${clientName}: highlight strengths, offer constructive feedback, and suggest next steps based on their background and their responses.\n\nReport:\n`;
+
+    // 8) Call OpenAI
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4-0613',
+      model: 'gpt-4.1',
       messages: [
-        { role: 'system', content: 'You are a helpful coach.' },
-        { role: 'user',    content: promptText      }
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: promptText }
       ],
-      max_tokens: 1500,
+      max_tokens: 7000,
       temperature: 0.7
     });
 

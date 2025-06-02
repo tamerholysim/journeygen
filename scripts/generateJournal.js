@@ -1,4 +1,4 @@
-// lib/generateJournalService.js
+/Users/tamerauf/journeygen/scripts/generateJournal.js
 
 import fs from 'fs/promises';
 import path from 'path';
@@ -61,7 +61,6 @@ You are a journal writer. Your task is to generate a complete guided journal bas
    - content (3–5 paragraphs of educational/explanatory text)
    - prompts: exactly 5 reflection prompts, each formatted as {"text": "prompt here"}
 
-After all parts and sections, append a final section called **Closing** that contains a final set of prompts for reflection and wrap-up.
 
 Return a single valid JSON object with keys:
 - "title" (string)
@@ -103,22 +102,7 @@ If you cannot generate the full structure, return a refusal JSON like {"error": 
     throw new Error('Unexpected response shape from GPT.');
   }
 
-  // 7) Ensure there is a “Closing” section
-  const hasClosing = tableOfContents.some(entry => entry.entryType === 'Closing');
-  if (!hasClosing) {
-    tableOfContents.push({
-      entryType: 'Closing',
-      title:     'Closing',
-      content:   'Thank you for completing this journal. Please use the prompts below to finalize your reflection.',
-      prompts: [
-        { text: 'How do you feel now that you have explored this topic?' },
-        { text: 'What is your main takeaway from this journal?' },
-        { text: 'How will you apply these insights going forward?' },
-        { text: 'Is there anything else you wish to reflect on before closing?' },
-        { text: 'Submit your final thoughts when you’re ready.' }
-      ]
-    });
-  }
+
 
   // 8) Save to MongoDB, including ownerId and clientId
   const newDoc = await Journal.create({
