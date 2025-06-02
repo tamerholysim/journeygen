@@ -51,11 +51,11 @@ async function generateJournal({
     systemPrompt += finalBackground + '\n\n';
   }
   systemPrompt += `
-You are a journal writer. Your task is to generate a complete guided journal based on the user's topic. The journal must include:
+You are a journal writer. Your task is to generate a complete guided journal based on the user's topic and his provided diagnostic and from within the holy sim framework in your knowledge bank. The journal must include:
 
 1. **Title**: A clear title based on the topic.
 2. **Description**: A brief description explaining the journal's content.
-3. **Table of Contents**: An array of sections, where each section has:
+3. **Table of Contents**: An array of 9 sections, where each section has:
    - entryType (either "Part", "Section", or "Closing")
    - title (string)
    - content (3–5 paragraphs of educational/explanatory text)
@@ -73,7 +73,7 @@ If you cannot generate the full structure, return a refusal JSON like {"error": 
 
   // 5) Ask GPT to build the JSON structure
   const completion = await openai.chat.completions.create({
-    model: 'gpt-4-0613',
+    model: 'gpt-4.1',
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user',   content: `Generate a complete guided journal on the topic: "${topic}".` }
