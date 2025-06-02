@@ -1,11 +1,11 @@
-// AFTER
+// client/src/Login.js
 import React, { useState } from 'react';
 
 export default function Login({ onLoginSuccess }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState(null);
-  const apiUrl = 'http://localhost:3001';   // ← hard-code your backend URL here for now
+  const apiUrl = 'http://localhost:3001'; // Backend URL
 
   // Pre‐computed Basic header for admin:pass
   const ADMIN_AUTH = 'Basic ' + btoa('admin:pass');
@@ -20,26 +20,41 @@ export default function Login({ onLoginSuccess }) {
       return;
     }
 
-    // 2) Otherwise, try client login
-    if (!email.includes('@') || password !== 'pass') {
+    // 2) Client login via JWT
+    if (!email.includes('@') || password === '') {
       setError('Invalid credentials.');
       return;
     }
 
     try {
-      // We’ll fetch all clients and find by email (so we don’t need a special /by-email endpoint)
-      const res = await fetch(`${apiUrl}/api/clients`, {
+      // 2.a) POST to /api/clients/login
+      const loginRes = await fetch(`${apiUrl}/api/clients/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email.trim(), password })
+      });
+      if (!loginRes.ok) {
+        const body = await loginRes.json().catch(() => ({}));
+        throw new Error(body.error || `Status ${loginRes.status}`);
+      }
+      const { token } = await loginRes.json();
+
+      // 2.b) Fetch the client’s own _id (to store in localStorage)
+      //     We could add a /api/clients/me endpoint protected by JWT, but for now:
+      const clientListRes = await fetch(`${apiUrl}/api/clients`, {
         headers: { Authorization: ADMIN_AUTH }
       });
-      if (!res.ok) throw new Error(`Status ${res.status}`);
-      const allClients = await res.json();
-      const client = allClients.find((c) => c.email === email.trim());
-      if (!client) throw new Error('No such client.');
+      if (!clientListRes.ok) throw new Error('Cannot fetch client list.');
+      const allClients = await clientListRes.json();
+      const me = allClients.find((c) => c.email === email.trim());
+      if (!me) throw new Error('Client not found.');
 
-      // Save client._id so ClientDashboard can read it
-      localStorage.setItem('clientId', client._id);
-      const authHeader = 'Basic ' + btoa(`${email.trim()}:${password}`);
-      onLoginSuccess({ role: 'client', authHeader });
+      // 2.c) Store JWT and clientId locally
+      localStorage.setItem('clientToken', token);
+      localStorage.setItem('clientId', me._id);
+
+      // 2.d) Inform parent that we’re “logged in” as client
+      onLoginSuccess({ role: 'client', authHeader: 'Bearer ' + token });
     } catch (err) {
       console.error(err);
       setError('Login failed. ' + err.message);
@@ -59,7 +74,7 @@ export default function Login({ onLoginSuccess }) {
             type="text"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            placeholder="admin or tamer@holysim.com"
+            placeholder="admin or client@example.com"
             style={{ width: '100%', padding: '0.5rem' }}
           />
         </label>
@@ -69,7 +84,7 @@ export default function Login({ onLoginSuccess }) {
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            placeholder="pass"
+            placeholder="pass (for admin) or your new password"
             style={{ width: '100%', padding: '0.5rem' }}
           />
         </label>

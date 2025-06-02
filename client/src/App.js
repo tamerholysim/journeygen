@@ -1,5 +1,15 @@
 // client/src/App.js
+
 import React, { useState } from 'react';
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Navigate,
+  useNavigate,
+  useLocation,
+} from 'react-router-dom';
+
 import Login from './Login';
 import Dashboard from './Dashboard';
 import KnowledgeBank from './KnowledgeBank';
@@ -8,12 +18,31 @@ import ClientDetail from './ClientDetail';
 import Journals from './Journals';
 import JournalUI from './JournalUI';
 import ClientDashboard from './ClientDashboard';
+import SetPassword from './SetPassword';
 
 export default function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        {/* 1) “Set Password” screen: extracts ?token= from URL */}
+        <Route path="/set-password" element={<SetPassword />} />
+
+        {/* 2) All other routes (login/admin/client) */}
+        <Route path="/*" element={<MainApp />} />
+      </Routes>
+    </BrowserRouter>
+  );
+}
+
+/**
+ * MainApp contains your existing “login → admin/client routes” logic,
+ * but now lives inside a <Route path="/*">.
+ */
+function MainApp() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [role, setRole] = useState(null);               // "admin" or "client"
-  const [authHeader, setAuthHeader] = useState(null);   // e.g. "Basic YWRtaW46cGFzcw=="
-  const [view, setView] = useState('dashboard');        // admin: 'dashboard'|'knowledge'|'clients'|'clientDetail'|'journals'|'journal'
+  const [role, setRole] = useState(null);             // "admin" or "client"
+  const [authHeader, setAuthHeader] = useState(null); // used by admin‐only endpoints
+  const [view, setView] = useState('dashboard');      // admin: 'dashboard'|'knowledge'|'clients'|'clientDetail'|'journals'|'journal'
   const [selectedClientId, setSelectedClientId] = useState(null);
   const [selectedJournalId, setSelectedJournalId] = useState(null);
   const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:3001';
@@ -25,6 +54,7 @@ export default function App() {
     setView('dashboard');
   }
 
+  // If not logged in, show <Login> regardless of the path (except /set-password)
   if (!isLoggedIn) {
     return <Login onLoginSuccess={handleLoginSuccess} />;
   }
@@ -128,12 +158,7 @@ export default function App() {
 
   // ── CLIENT ROUTE ────────────────────────────────────────────
   if (role === 'client') {
-    return (
-      <ClientDashboard
-        apiUrl={apiUrl}
-        authHeader={authHeader}
-      />
-    );
+    return <ClientDashboard apiUrl={apiUrl} />;
   }
 
   return null;

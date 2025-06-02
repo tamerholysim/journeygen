@@ -1,8 +1,9 @@
 // client/src/JournalUI.js
+
 import React, { useState, useEffect } from 'react';
 import jsPDF from 'jspdf';
 
-export default function JournalUI({ journalId, apiUrl, authHeader }) {
+export default function JournalUI({ journalId, apiUrl }) {
   const [journal, setJournal] = useState(null);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [responses, setResponses] = useState([]);
@@ -16,9 +17,10 @@ export default function JournalUI({ journalId, apiUrl, authHeader }) {
     setJournal(null);
     setLoadError(null);
 
+    const token = localStorage.getItem('clientToken');
     fetch(`${apiUrl}/api/journals/${journalId}`, {
       headers: {
-        Authorization: authHeader
+        Authorization: 'Bearer ' + token
       }
     })
       .then((res) => {
@@ -42,7 +44,7 @@ export default function JournalUI({ journalId, apiUrl, authHeader }) {
         console.error(err);
         setLoadError(err.message);
       });
-  }, [journalId, apiUrl, authHeader]);
+  }, [journalId, apiUrl]);
 
   const handlePromptChange = (secIdx, promptIdx, text) => {
     setResponses((prev) => {
@@ -58,11 +60,12 @@ export default function JournalUI({ journalId, apiUrl, authHeader }) {
     setLoadingReport(true);
     setReportError(null);
 
+    const token = localStorage.getItem('clientToken');
     fetch(`${apiUrl}/api/journals/${journalId}/report`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: authHeader
+        Authorization: 'Bearer ' + token
       },
       body: JSON.stringify({ responses })
     })
@@ -402,7 +405,6 @@ export default function JournalUI({ journalId, apiUrl, authHeader }) {
                 whiteSpace: 'pre-wrap'
               }}
             >
-              {/* Plain‐text rendering of the report */}
               {report}
             </div>
 

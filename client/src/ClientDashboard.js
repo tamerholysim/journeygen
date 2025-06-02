@@ -1,8 +1,9 @@
 // client/src/ClientDashboard.jsx
+
 import React, { useState, useEffect } from 'react';
 import JournalUI from './JournalUI';
 
-export default function ClientDashboard({ apiUrl, authHeader }) {
+export default function ClientDashboard({ apiUrl }) {
   const [clientId, setClientId] = useState(null);
   const [journals, setJournals] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -26,9 +27,10 @@ export default function ClientDashboard({ apiUrl, authHeader }) {
     setLoading(true);
     setError(null);
 
+    const token = localStorage.getItem('clientToken');
     fetch(`${apiUrl}/api/journals/client/${clientId}`, {
       headers: {
-        Authorization: authHeader
+        Authorization: 'Bearer ' + token
       }
     })
       .then((res) => {
@@ -47,7 +49,7 @@ export default function ClientDashboard({ apiUrl, authHeader }) {
       .finally(() => {
         setLoading(false);
       });
-  }, [apiUrl, authHeader, clientId]);
+  }, [apiUrl, clientId]);
 
   // 3) If a journal is selected, render JournalUI for it
   if (viewingJournalId) {
@@ -62,7 +64,6 @@ export default function ClientDashboard({ apiUrl, authHeader }) {
         <JournalUI
           journalId={viewingJournalId}
           apiUrl={apiUrl}
-          authHeader={authHeader}
         />
       </div>
     );
