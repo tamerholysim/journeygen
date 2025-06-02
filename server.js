@@ -5,23 +5,346 @@ import cors from 'cors';
 import mongoose from 'mongoose';
 import fs from 'fs/promises';
 import path from 'path';
+import multer from 'multer';
 import { fileURLToPath } from 'url';
+
 import dbConnect from './lib/dbConnect.js';
+import generateJournal from './lib/generateJournalService.js';
+import OpenAI from 'openai';         // ← We need this import for the report endpoint
+
+// Models
+import User from './models/User.js';
+import Client from './models/Client.js';
+import KnowledgeDoc from './models/KnowledgeDoc.js';
 import Journal from './models/Journal.js';
-import generateJournal from './lib/generateJournalService.js'; // our shared service
-import OpenAI from 'openai';
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json()); // parse JSON bodies
 
+//
+// ─── BASIC “admin:pass” AUTH MIDDLEWARE ────────────────────────────────────────
+//
+function requireAdmin(req, res, next) {
+  const auth = req.headers.authorization || '';
+  if (!auth.startsWith('Basic ')) {
+    return res.status(401).json({ error: 'Missing Authorization header' });
+  }
+  let decoded;
+  try {
+    decoded = Buffer.from(auth.split(' ')[1], 'base64').toString(); // "admin:pass"
+  } catch {
+    return res.status(401).json({ error: 'Invalid Authorization header' });
+  }
+  const [username, password] = decoded.split(':');
+  if (username === 'admin' && password === 'pass') {
+    return next();
+  }
+  return res.status(403).json({ error: 'Invalid credentials' });
+}
 
-// ——————————————
-// POST /api/journals
-// Create a new journal with { topic, background, bookingLink }
-// ——————————————
-app.post('/api/journals', async (req, res) => {
-  const { topic, background, bookingLink } = req.body;
+//
+// ─── SEED ADMIN USER (run once at startup) ────────────────────────────────────
+//
+async function seedAdminUser() {
+  await dbConnect();
+  const existing = await User.findOne({ username: 'admin' });
+  if (!existing) {
+    await User.create({ username: 'admin', password: 'pass' });
+    console.log('✅  Seeded admin user (username="admin", password="pass").');
+  }
+}
+seedAdminUser().catch(console.error);
+
+//
+// ─── MULTER SETUP FOR FILE UPLOADS ─────────────────────────────────────────────
+//
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+const uploadDir  = path.resolve(__dirname, 'uploads');
+
+// Ensure the uploads directory exists
+;(async () => {
+  try {
+    await fs.access(uploadDir);
+  } catch {
+    await fs.mkdir(uploadDir, { recursive: true });
+  }
+})();
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    cb(null, `${Date.now()}-${file.originalname}`);
+  }
+});
+const upload = multer({ storage });
+
+// Serve uploaded files (Knowledge / Client files) at /uploads
+app.use('/uploads', express.static(uploadDir));
+
+//
+// ─── KNOWLEDGE BANK ENDPOINTS ─────────────────────────────────────────────────
+//
+
+/**
+ * POST /api/knowledge
+ * Upload a new background document.
+ * • Requires Basic Auth = “admin:pass”
+ * • multipart/form-data field “doc” + optional “name”
+ */
+app.post(
+  '/api/knowledge',
+  requireAdmin,
+  upload.single('doc'),
+  async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded.' });
+    }
+    const docName = req.body.name || req.file.originalname;
+    const fileUrl = `/uploads/${req.file.filename}`;
+
+    try {
+      await dbConnect();
+      const saved = await KnowledgeDoc.create({
+        name:       docName,
+        fileUrl,
+        uploadedAt: new Date()
+      });
+      return res.status(201).json(saved);
+    } catch (err) {
+      console.error('Error in POST /api/knowledge:', err);
+      return res.status(500).json({ error: 'Failed to save knowledge document.' });
+    }
+  }
+);
+
+/**
+ * GET /api/knowledge
+ * List all background documents.
+ * • Requires Basic Auth = “admin:pass”
+ */
+app.get('/api/knowledge', requireAdmin, async (req, res) => {
+  try {
+    await dbConnect();
+    const allDocs = await KnowledgeDoc.find().sort({ uploadedAt: -1 }).lean();
+    return res.json(allDocs);
+  } catch (err) {
+    console.error('Error in GET /api/knowledge:', err);
+    return res.status(500).json({ error: 'Server error listing knowledge.' });
+  }
+});
+
+/**
+ * DELETE /api/knowledge/:id
+ * Delete a background document by ID.
+ * • Requires Basic Auth = “admin:pass”
+ */
+app.delete('/api/knowledge/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ error: 'Invalid document ID.' });
+  }
+  try {
+    await dbConnect();
+    const doc = await KnowledgeDoc.findById(id);
+    if (!doc) {
+      return res.status(404).json({ error: 'Document not found.' });
+    }
+    // Delete the file from disk if present
+    const localFilePath = path.resolve(__dirname, doc.fileUrl.replace(/^\//, ''));
+    try {
+      await fs.unlink(localFilePath);
+    } catch { /* ignore missing file */ }
+    await doc.deleteOne();
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Error in DELETE /api/knowledge/:id:', err);
+    return res.status(500).json({ error: 'Delete failed.' });
+  }
+});
+
+//
+// ─── CLIENT CRUD ENDPOINTS ─────────────────────────────────────────────────────
+//
+
+/**
+ * POST /api/clients
+ * Create a new client.
+ * • Requires Basic Auth = “admin:pass”
+ * • multipart/form-data: fields “firstName, lastName, email, gender, dateOfBirth, background” + optional file under “file”
+ */
+app.post(
+  '/api/clients',
+  requireAdmin,
+  upload.single('file'),
+  async (req, res) => {
+    try {
+      const {
+        firstName,
+        lastName,
+        email,
+        gender,
+        dateOfBirth,
+        background
+      } = req.body;
+      if (!firstName || !lastName || !email) {
+        return res.status(400).json({ error: 'firstName, lastName, and email are required.' });
+      }
+
+      const newClientData = {
+        firstName:   firstName.trim(),
+        lastName:    lastName.trim(),
+        email:       email.trim(),
+        gender:      gender || 'Other',
+        dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
+        background:  background || ''
+      };
+
+      if (req.file) {
+        newClientData.fileUploads = [
+          {
+            filename: req.file.filename,
+            path:     `/uploads/${req.file.filename}`,
+            mimetype: req.file.mimetype,
+            size:     req.file.size
+          }
+        ];
+      }
+
+      await dbConnect();
+      const created = await Client.create(newClientData);
+      return res.status(201).json(created);
+    } catch (err) {
+      console.error('Error in POST /api/clients:', err);
+      return res.status(500).json({ error: 'Failed to create client.' });
+    }
+  }
+);
+
+/**
+ * GET /api/clients
+ * List all clients.
+ * • Requires Basic Auth = “admin:pass”
+ */
+app.get('/api/clients', requireAdmin, async (req, res) => {
+  try {
+    await dbConnect();
+    const all = await Client.find()
+      .sort({ lastName: 1, firstName: 1 })
+      .lean();
+    return res.json(all);
+  } catch (err) {
+    console.error('Error in GET /api/clients:', err);
+    return res.status(500).json({ error: 'Server error listing clients.' });
+  }
+});
+
+/**
+ * GET /api/clients/:id
+ * Fetch a single client by ID.
+ * • Requires Basic Auth = “admin:pass”
+ */
+app.get('/api/clients/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ error: 'Invalid client ID.' });
+  }
+  try {
+    await dbConnect();
+    const client = await Client.findById(id).lean();
+    if (!client) {
+      return res.status(404).json({ error: 'Client not found.' });
+    }
+    return res.json(client);
+  } catch (err) {
+    console.error('Error in GET /api/clients/:id:', err);
+    return res.status(500).json({ error: 'Server error.' });
+  }
+});
+
+/**
+ * PUT /api/clients/:id
+ * Update a client by ID.
+ * • Requires Basic Auth = “admin:pass”
+ * • JSON body may contain fields to update (file upload has separate route)
+ */
+app.put('/api/clients/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const updates = req.body;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ error: 'Invalid client ID.' });
+  }
+  try {
+    await dbConnect();
+    updates.updatedAt = new Date();
+    const updated = await Client.findByIdAndUpdate(id, updates, { new: true }).lean();
+    if (!updated) {
+      return res.status(404).json({ error: 'Client not found.' });
+    }
+    return res.json(updated);
+  } catch (err) {
+    console.error('Error in PUT /api/clients/:id:', err);
+    return res.status(500).json({ error: 'Update failed.' });
+  }
+});
+
+/**
+ * DELETE /api/clients/:id
+ * Remove a client by ID.
+ * • Requires Basic Auth = “admin:pass”
+ */
+app.delete('/api/clients/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ error: 'Invalid client ID.' });
+  }
+  try {
+    await dbConnect();
+    await Client.findByIdAndDelete(id);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Error in DELETE /api/clients/:id:', err);
+    return res.status(500).json({ error: 'Delete failed.' });
+  }
+});
+
+//
+// ─── JOURNAL ENDPOINTS ─────────────────────────────────────────────────────────
+//
+
+/**
+ * GET /api/journals
+ * List all journals owned by the admin user.
+ * • Requires Basic Auth = “admin:pass”
+ */
+app.get('/api/journals', requireAdmin, async (req, res) => {
+  try {
+    await dbConnect();
+    const adminUser = await User.findOne({ username: 'admin' });
+    if (!adminUser) {
+      return res.status(500).json({ error: 'Admin user missing.' });
+    }
+    const allJ = await Journal.find({ ownerId: adminUser._id })
+      .sort({ createdAt: -1 })
+      .lean();
+    return res.json(allJ);
+  } catch (err) {
+    console.error('Error in GET /api/journals:', err);
+    return res.status(500).json({ error: 'Server error listing journals.' });
+  }
+});
+
+/**
+ * POST /api/journals
+ * Create a new journal.
+ * • Requires Basic Auth = “admin:pass”
+ * • JSON body: { topic, background, bookingLink, clientId }
+ */
+app.post('/api/journals', requireAdmin, async (req, res) => {
+  const { topic, background, bookingLink, clientId } = req.body;
 
   if (!topic || typeof topic !== 'string') {
     return res.status(400).json({ error: 'Missing or invalid "topic".' });
@@ -32,21 +355,38 @@ app.post('/api/journals', async (req, res) => {
   if (bookingLink !== undefined && typeof bookingLink !== 'string') {
     return res.status(400).json({ error: '"bookingLink" must be a string if provided.' });
   }
+  if (!clientId || !mongoose.Types.ObjectId.isValid(clientId)) {
+    return res.status(400).json({ error: 'Missing or invalid "clientId".' });
+  }
 
   try {
-    // 1) Generate & save the journal (topic + background):
-    //    generateJournal returns the saved Mongo document (without bookingLink yet)
+    await dbConnect();
+    // Verify client exists
+    const client = await Client.findById(clientId).lean();
+    if (!client) {
+      return res.status(404).json({ error: 'Client not found.' });
+    }
+
+    // Get admin user’s _id
+    const adminUser = await User.findOne({ username: 'admin' });
+    if (!adminUser) {
+      return res.status(500).json({ error: 'Admin user missing.' });
+    }
+
+    // Delegate to generateJournalService (saves a Journal without bookingLink)
     const savedJournal = await generateJournal({
       topic,
       backgroundText: background || '',
-      bookingLink: '' // we’ll attach bookingLink in the next step
+      bookingLink:    '',               // placeholder
+      ownerId:        adminUser._id.toString(),
+      clientId:       client._id.toString()
     });
 
-    // 2) Now attach bookingLink (if provided) and update that same document:
+    // Update that saved journal to set bookingLink
     const updated = await Journal.findByIdAndUpdate(
       savedJournal._id,
       { bookingLink: bookingLink || '' },
-      { new: true } // return the updated document
+      { new: true }
     ).lean();
 
     return res.status(201).json(updated);
@@ -56,34 +396,127 @@ app.post('/api/journals', async (req, res) => {
   }
 });
 
-
-// ——————————————
-// GET /api/journals/:id
-// Fetch existing journal by its MongoDB _id
-// ——————————————
+/**
+ * GET /api/journals/:id
+ * Fetch one journal by ID.
+ * - ADMIN (username="admin", password="pass") can fetch any journal.
+ * - CLIENT (email:pass) can fetch only if journal.clientId === their client._id.
+ */
 app.get('/api/journals/:id', async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
-    return res.status(400).json({ error: 'Invalid journal ID format.' });
+    return res.status(400).json({ error: 'Invalid journal ID.' });
   }
+
+  const auth = req.headers.authorization || '';
+  if (!auth.startsWith('Basic ')) {
+    return res.status(401).json({ error: 'Missing Authorization header' });
+  }
+
+  let decoded;
+  try {
+    decoded = Buffer.from(auth.split(' ')[1], 'base64').toString(); // e.g. "admin:pass" or "user@…:pass"
+  } catch {
+    return res.status(401).json({ error: 'Invalid Authorization header' });
+  }
+  const [username, password] = decoded.split(':');
+
   try {
     await dbConnect();
+
+    // 1) ADMIN case:
+    if (username === 'admin' && password === 'pass') {
+      const journal = await Journal.findById(id).lean();
+      if (!journal) {
+        return res.status(404).json({ error: 'Journal not found.' });
+      }
+      return res.json(journal);
+    }
+
+    // 2) CLIENT case:
+    if (!username.includes('@') || password !== 'pass') {
+      return res.status(403).json({ error: 'Invalid credentials' });
+    }
+    const client = await Client.findOne({ email: username.trim() }).lean();
+    if (!client) {
+      return res.status(404).json({ error: 'Client not found.' });
+    }
+
+    // 3) Only allow fetch if journal.clientId matches this client’s ID
     const journal = await Journal.findById(id).lean();
     if (!journal) {
       return res.status(404).json({ error: 'Journal not found.' });
     }
+    if (journal.clientId.toString() !== client._id.toString()) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     return res.json(journal);
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'Server error' });
+    console.error('Error in GET /api/journals/:id:', err);
+    return res.status(500).json({ error: 'Server error.' });
   }
 });
 
+/**
+ * GET /api/journals/client/:clientId
+ * List all journals for a given client.
+ * - ADMIN (admin:pass) can list any client’s journals.
+ * - CLIENT (email:pass) can list only their own journals.
+ */
+app.get('/api/journals/client/:clientId', async (req, res) => {
+  const { clientId } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(clientId)) {
+    return res.status(400).json({ error: 'Invalid client ID.' });
+  }
 
-// ——————————————
-// POST /api/journals/:id/report
-// Generate a “report” from user responses, prepending Holy Sim background
-// ——————————————
+  const auth = req.headers.authorization || '';
+  if (!auth.startsWith('Basic ')) {
+    return res.status(401).json({ error: 'Missing Authorization header' });
+  }
+
+  let decoded;
+  try {
+    decoded = Buffer.from(auth.split(' ')[1], 'base64').toString(); // "admin:pass" or "user@…:pass"
+  } catch {
+    return res.status(401).json({ error: 'Invalid Authorization header' });
+  }
+  const [username, password] = decoded.split(':');
+
+  try {
+    await dbConnect();
+
+    // 1) ADMIN: can list any client’s journals
+    if (username === 'admin' && password === 'pass') {
+      const userJournals = await Journal.find({ clientId }).sort({ createdAt: -1 }).lean();
+      return res.json(userJournals);
+    }
+
+    // 2) CLIENT: can only list if auth’s email matches that clientId
+    if (!username.includes('@') || password !== 'pass') {
+      return res.status(403).json({ error: 'Invalid credentials' });
+    }
+    const client = await Client.findOne({ email: username.trim() }).lean();
+    if (!client) {
+      return res.status(404).json({ error: 'Client not found.' });
+    }
+    if (client._id.toString() !== clientId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const userJournals = await Journal.find({ clientId }).sort({ createdAt: -1 }).lean();
+    return res.json(userJournals);
+  } catch (err) {
+    console.error('Error in GET /api/journals/client/:clientId:', err);
+    return res.status(500).json({ error: 'Server error listing client journals.' });
+  }
+});
+
+/**
+ * POST /api/journals/:id/report
+ * Generate a “report” given user’s responses.
+ * - ADMIN (admin:pass) may generate a report on any journal.
+ * - CLIENT (email:pass) may generate only on their own journal.
+ */
 app.post('/api/journals/:id/report', async (req, res) => {
   const { id } = req.params;
   const { responses } = req.body;
@@ -95,40 +528,79 @@ app.post('/api/journals/:id/report', async (req, res) => {
     return res.status(400).json({ error: 'Missing or invalid "responses" array.' });
   }
 
+  const auth = req.headers.authorization || '';
+  if (!auth.startsWith('Basic ')) {
+    return res.status(401).json({ error: 'Missing Authorization header' });
+  }
+
+  let decoded;
   try {
-    // 1) Read lib/Background.txt if it exists
+    decoded = Buffer.from(auth.split(' ')[1], 'base64').toString();
+  } catch {
+    return res.status(401).json({ error: 'Invalid Authorization header' });
+  }
+  const [username, password] = decoded.split(':');
+
+  try {
+    await dbConnect();
+
+    // 1) ADMIN: allowed on any journal
+    if (username === 'admin' && password === 'pass') {
+      // proceed below to build prompt & call OpenAI
+    }
+    else {
+      // 2) CLIENT: must match journal.clientId
+      if (!username.includes('@') || password !== 'pass') {
+        return res.status(403).json({ error: 'Invalid credentials' });
+      }
+      const client = await Client.findOne({ email: username.trim() }).lean();
+      if (!client) {
+        return res.status(404).json({ error: 'Client not found.' });
+      }
+
+      const journal = await Journal.findById(id).lean();
+      if (!journal) {
+        return res.status(404).json({ error: 'Journal not found.' });
+      }
+      if (journal.clientId.toString() !== client._id.toString()) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      // allowed—fall through to GPT-step below
+    }
+
+    // ─── Build the GPT prompt (same logic as before) ──────────────────────
+
+    // 1) Try to read Background.txt from disk (optional)
     let backgroundText = '';
     try {
       const __filename = fileURLToPath(import.meta.url);
-      const __dirname = path.dirname(__filename);
-      const bgPath = path.resolve(__dirname, 'lib/Background.txt');
+      const __dirname  = path.dirname(__filename);
+      const bgPath     = path.resolve(__dirname, 'lib/Background.txt');
       await fs.access(bgPath);
       backgroundText = await fs.readFile(bgPath, 'utf-8');
     } catch {
       backgroundText = '';
     }
 
-    // 2) Fetch the journal by ID
-    await dbConnect();
+    // 2) Fetch the journal (again, because an admin might want to report on an old one)
     const journal = await Journal.findById(id).lean();
     if (!journal) {
       return res.status(404).json({ error: 'Journal not found.' });
     }
 
-    // 3) Build the GPT prompt (prepend backgroundText if present)
+    // 3) Build the full prompt text
     let promptText = '';
     if (backgroundText.trim()) {
       promptText += backgroundText.trim() + '\n\n';
     }
     promptText += `
-You are a coach’s assistant using the Holy Sim framework above. 
+You are a coach’s assistant using the Holy Sim framework above.
 Based on the following guided journal, generate a personalized report with suggestions, insights, and next steps for the user, all from within that framework.
 
 Journal Title: ${journal.title}
 Journal Description: ${journal.description}
 
 `;
-
     journal.tableOfContents.forEach((section, secIdx) => {
       promptText += `---\nSection (${section.entryType}): ${section.title}\n`;
       promptText += `Content: ${section.content}\n`;
@@ -144,16 +616,15 @@ Journal Description: ${journal.description}
       });
       promptText += `\n`;
     });
-
     promptText += `---\nNow provide a cohesive report for the user: highlight strengths, offer constructive feedback, and suggest next steps based on their responses.\n\nReport:\n`;
 
-    // 4) Call OpenAI to generate the report
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    // 4) Call OpenAI
+    const openai     = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const completion = await openai.chat.completions.create({
       model: 'gpt-4-0613',
       messages: [
         { role: 'system', content: 'You are a helpful coach.' },
-        { role: 'user', content: promptText }
+        { role: 'user',    content: promptText      }
       ],
       max_tokens: 1500,
       temperature: 0.7
@@ -165,11 +636,14 @@ Journal Description: ${journal.description}
     }
     return res.json({ report: gptMessage });
   } catch (err) {
-    console.error(err);
+    console.error('Error in POST /api/journals/:id/report:', err);
     return res.status(500).json({ error: 'Server error generating report.' });
   }
 });
 
+//
+// ─── START THE SERVER ─────────────────────────────────────────────────────────
+//
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`📄  API server listening on http://localhost:${PORT}`);

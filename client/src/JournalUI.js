@@ -2,25 +2,32 @@
 import React, { useState, useEffect } from 'react';
 import jsPDF from 'jspdf';
 
-export default function JournalUI({ journalId }) {
+export default function JournalUI({ journalId, apiUrl, authHeader }) {
   const [journal, setJournal] = useState(null);
-  // 0 = Overview; 1..N = each section; N+1 = Report
   const [currentIndex, setCurrentIndex] = useState(0);
-
-  // responses[sectionIdx][promptIdx]
   const [responses, setResponses] = useState([]);
-
-  // Report state
   const [report, setReport] = useState(null);
   const [loadingReport, setLoadingReport] = useState(false);
   const [reportError, setReportError] = useState(null);
+  const [loadError, setLoadError] = useState(null);
 
-  // Fetch journal on mount
+  // 1) Fetch journal on mount
   useEffect(() => {
-    const apiUrl = process.env.REACT_APP_API_URL || '';
-    fetch(`${apiUrl}/api/journals/${journalId}`)
+    setJournal(null);
+    setLoadError(null);
+
+    fetch(`${apiUrl}/api/journals/${journalId}`, {
+      headers: {
+        Authorization: authHeader
+      }
+    })
       .then((res) => {
-        if (!res.ok) throw new Error('Network response was not OK');
+        if (!res.ok) {
+          if (res.status === 403) {
+            throw new Error('Forbidden: invalid credentials.');
+          }
+          throw new Error(`Network response was not OK (status ${res.status})`);
+        }
         return res.json();
       })
       .then((data) => {
@@ -33,9 +40,9 @@ export default function JournalUI({ journalId }) {
       })
       .catch((err) => {
         console.error(err);
-        setJournal({ error: 'Failed to load journal.' });
+        setLoadError(err.message);
       });
-  }, [journalId]);
+  }, [journalId, apiUrl, authHeader]);
 
   const handlePromptChange = (secIdx, promptIdx, text) => {
     setResponses((prev) => {
@@ -45,29 +52,31 @@ export default function JournalUI({ journalId }) {
     });
   };
 
+  // 2) Submit responses → generate a report
   const handleSubmit = () => {
     if (!journal) return;
-
     setLoadingReport(true);
     setReportError(null);
 
-    const apiUrl = process.env.REACT_APP_API_URL || '';
     fetch(`${apiUrl}/api/journals/${journalId}/report`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: authHeader
+      },
       body: JSON.stringify({ responses })
     })
       .then((res) => {
         if (!res.ok) {
           return res.json().then((body) => {
-            throw new Error(body.error || 'Unknown error');
+            throw new Error(body.error || `Status ${res.status}`);
           });
         }
         return res.json();
       })
       .then((data) => {
         setReport(data.report);
-        // Jump to Report pane: index = 1 + number of sections
+        // Jump to the “Report” tab
         setCurrentIndex(1 + journal.tableOfContents.length);
       })
       .catch((err) => {
@@ -79,6 +88,14 @@ export default function JournalUI({ journalId }) {
       });
   };
 
+  // 3) Render loading / error states first
+  if (loadError) {
+    return (
+      <div style={{ padding: '2rem', color: 'red', textAlign: 'center' }}>
+        <h3>Error: {loadError}</h3>
+      </div>
+    );
+  }
   if (!journal) {
     return (
       <div style={{ padding: '2rem', textAlign: 'center' }}>
@@ -87,27 +104,20 @@ export default function JournalUI({ journalId }) {
     );
   }
 
-  if (journal.error) {
-    return (
-      <div style={{ padding: '2rem', textAlign: 'center', color: 'red' }}>
-        <h3>Error: {journal.error}</h3>
-      </div>
-    );
-  }
-
+  // 4) Journal & report loaded; now build the “Overview / Sections / Report” UI
   const numSections = journal.tableOfContents.length;
   const isOverview = currentIndex === 0;
   const isReport = report && currentIndex === numSections + 1;
   const sectionIndex = !isOverview && !isReport ? currentIndex - 1 : null;
 
-  // Ensure full URL (add https:// if missing)
+  // Utility: ensure bookingLink has “https://” if not present
   const normalizeLink = (raw) => {
     if (!raw) return '';
     if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
     return 'https://' + raw;
   };
 
-  // Generate and download PDF
+  // Utility: generate a PDF of the entire journal + answers + report
   const handleSavePDF = () => {
     const doc = new jsPDF();
     const leftMargin = 20;
@@ -133,7 +143,7 @@ export default function JournalUI({ journalId }) {
     });
     yPos += lineHeight;
 
-    // 3) Iterate through each section: prompts & responses
+    // 3) Each section: print title, content, prompts & user answers
     journal.tableOfContents.forEach((section, secIdx) => {
       if (yPos + lineHeight > pageHeight - 20) {
         doc.addPage();
@@ -144,22 +154,6 @@ export default function JournalUI({ journalId }) {
       yPos += lineHeight;
 
       doc.setFontSize(12);
-      // Section content (optional to include, but we'll skip long content to focus on prompts)
-      // You can uncomment if you want to include the explanatory content itself:
-      /*
-      const contentLines = doc.splitTextToSize(section.content, 170);
-      contentLines.forEach(line => {
-        if (yPos + lineHeight > pageHeight - 20) {
-          doc.addPage();
-          yPos = 20;
-        }
-        doc.text(line, leftMargin, yPos);
-        yPos += lineHeight;
-      });
-      yPos += lineHeight;
-      */
-
-      // Prompts and user’s answers
       section.prompts.forEach((pObj, pIdx) => {
         // Prompt text
         const promptLines = doc.splitTextToSize(`• ${pObj.text}`, 165);
@@ -172,7 +166,7 @@ export default function JournalUI({ journalId }) {
           yPos += lineHeight;
         });
 
-        // Response text
+        // User’s answer
         const userAnswer = (responses[secIdx] && responses[secIdx][pIdx]) || '';
         const answerLabel = `   → ${userAnswer || '[no response]'}`;
         const answerLines = doc.splitTextToSize(answerLabel, 165);
@@ -190,7 +184,7 @@ export default function JournalUI({ journalId }) {
       yPos += lineHeight;
     });
 
-    // 4) Add the “Report” section
+    // 4) Final “Report” section
     if (yPos + lineHeight > pageHeight - 20) {
       doc.addPage();
       yPos = 20;
@@ -216,7 +210,7 @@ export default function JournalUI({ journalId }) {
 
   return (
     <div style={{ display: 'flex', height: '100vh' }}>
-      {/* Sidebar */}
+      {/* ─── Sidebar ──────────────────────────────────────────── */}
       <div
         style={{
           width: '260px',
@@ -227,7 +221,7 @@ export default function JournalUI({ journalId }) {
       >
         <h3 style={{ marginTop: 0 }}>Contents</h3>
 
-        {/* Overview */}
+        {/* Overview link */}
         <div
           onClick={() => setCurrentIndex(0)}
           style={{
@@ -241,7 +235,7 @@ export default function JournalUI({ journalId }) {
           Overview
         </div>
 
-        {/* Sections */}
+        {/* List all sections */}
         {journal.tableOfContents.map((sec, idx) => (
           <div
             key={idx}
@@ -259,7 +253,7 @@ export default function JournalUI({ journalId }) {
           </div>
         ))}
 
-        {/* Report (if generated) */}
+        {/* If report exists, show “Report” link */}
         {report && (
           <div
             onClick={() => setCurrentIndex(numSections + 1)}
@@ -278,7 +272,7 @@ export default function JournalUI({ journalId }) {
         )}
       </div>
 
-      {/* Main Pane */}
+      {/* ─── Main Pane ─────────────────────────────────────────── */}
       <div
         style={{
           flex: 1,
@@ -286,6 +280,7 @@ export default function JournalUI({ journalId }) {
           overflowY: 'auto'
         }}
       >
+        {/* Overview pane */}
         {isOverview && (
           <>
             <h1>{journal.title}</h1>
@@ -309,6 +304,7 @@ export default function JournalUI({ journalId }) {
           </>
         )}
 
+        {/* Section pane (for each section) */}
         {!isOverview && !isReport && sectionIndex !== null && (
           <>
             <h2>{journal.tableOfContents[sectionIndex].title}</h2>
@@ -395,6 +391,7 @@ export default function JournalUI({ journalId }) {
           </>
         )}
 
+        {/* Report pane */}
         {isReport && (
           <>
             <h1>Report</h1>
@@ -408,7 +405,7 @@ export default function JournalUI({ journalId }) {
               {report}
             </div>
 
-            {/* “Get Consultation” Button */}
+            {/* “Get Consultation” button */}
             {journal.bookingLink && (
               <div style={{ marginTop: '2rem', textAlign: 'center' }}>
                 <a
@@ -431,7 +428,7 @@ export default function JournalUI({ journalId }) {
               </div>
             )}
 
-            {/* “Save PDF” Button */}
+            {/* “Save PDF” button */}
             <div style={{ marginTop: '1rem', textAlign: 'center' }}>
               <button
                 onClick={handleSavePDF}
