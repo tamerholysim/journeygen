@@ -5,9 +5,6 @@ import {
   BrowserRouter,
   Routes,
   Route,
-  Navigate,
-  useNavigate,
-  useLocation,
 } from 'react-router-dom';
 
 import Login from './Login';

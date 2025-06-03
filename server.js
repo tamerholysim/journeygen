@@ -1,3 +1,5 @@
+// server.js
+
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -6,10 +8,13 @@ import fs from 'fs/promises';
 import path from 'path';
 import multer from 'multer';
 import { fileURLToPath } from 'url';
+import bcrypt from 'bcrypt';
+import crypto from 'crypto';
+import nodemailer from 'nodemailer';
 
 import dbConnect from './lib/dbConnect.js';
 import generateJournal from './lib/generateJournalService.js';
-import OpenAI from 'openai'; // ← needed for the report endpoint
+import OpenAI from 'openai';
 
 // Models
 import User from './models/User.js';
@@ -19,7 +24,19 @@ import Journal from './models/Journal.js';
 
 const app = express();
 app.use(cors());
-app.use(express.json()); // parse JSON bodies
+app.use(express.json());
+
+// ─── BEARER→BASIC AUTH TRANSLATION ────────────────────────────────────────────
+// If the client sends "Authorization: Bearer <base64(email:pass)>", rewrite it
+// to "Authorization: Basic <base64(email:pass)>", so existing Basic‐auth logic still works.
+app.use((req, res, next) => {
+  const auth = req.headers.authorization || '';
+  if (auth.startsWith('Bearer ')) {
+    const token = auth.split(' ')[1]; // the base64(email:pass)
+    req.headers.authorization = 'Basic ' + token;
+  }
+  next();
+});
 
 //
 // ─── BASIC “admin:pass” AUTH MIDDLEWARE ────────────────────────────────────────
@@ -31,7 +48,7 @@ function requireAdmin(req, res, next) {
   }
   let decoded;
   try {
-    decoded = Buffer.from(auth.split(' ')[1], 'base64').toString(); // "admin:pass"
+    decoded = Buffer.from(auth.split(' ')[1], 'base64').toString(); // "admin:pass" or "email:pass"
   } catch {
     return res.status(401).json({ error: 'Invalid Authorization header' });
   }
@@ -62,7 +79,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const uploadDir = path.resolve(__dirname, 'uploads');
 
-// Ensure the uploads directory exists
 ;(async () => {
   try {
     await fs.access(uploadDir);
@@ -80,20 +96,102 @@ const storage = multer.diskStorage({
   }
 });
 const upload = multer({ storage });
-
-// Serve uploaded files (Knowledge / Client files) at /uploads
 app.use('/uploads', express.static(uploadDir));
+
+//
+// ─── SET UP NODEMAILER TRANSPORTER ────────────────────────────────────────────
+// (Replace these with your real SMTP/env variables)
+const transporter = nodemailer.createTransport({
+  host: process.env.EMAIL_HOST,      // e.g. "smtp.gmail.com"
+  port: process.env.EMAIL_PORT || 587,
+  secure: true,
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  }
+});
+
+transporter.verify((err, success) => {
+  if (err) {
+    console.error('SMTP configuration error:', err);
+  } else {
+    console.log('SMTP is ready to send messages');
+  }
+});
+
+//
+// ─── CLIENT LOGIN ENDPOINT (checks stored hash) ───────────────────────────────
+//
+/**
+ * POST /api/clients/login
+ * Body: { email, password }
+ * Returns: { token }  where token = base64(email:password)
+ */
+app.post('/api/clients/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password required.' });
+  }
+
+  try {
+    await dbConnect();
+    const client = await Client.findOne({ email: email.trim() });
+    if (!client) {
+      return res.status(404).json({ error: 'No client with that email.' });
+    }
+    if (!client.isActive) {
+      return res.status(403).json({ error: 'Account not activated yet.' });
+    }
+    const ok = await client.checkPassword(password);
+    if (!ok) {
+      return res.status(403).json({ error: 'Invalid password.' });
+    }
+    // Build a base64‐encoded "email:password" so the frontend can use Bearer
+    const token = Buffer.from(`${email.trim()}:${password}`).toString('base64');
+    return res.json({ token });
+  } catch (err) {
+    console.error('Error in POST /api/clients/login:', err);
+    return res.status(500).json({ error: 'Server error during login.' });
+  }
+});
+
+//
+// ─── CLIENT “SET PASSWORD” ENDPOINT ───────────────────────────────────────────
+//
+/**
+ * POST /api/clients/set-password
+ * Body: { token, password, confirmPassword }
+ * - Finds the Client by inviteToken === token
+ * - If valid and passwords match, hash & set their passwordHash + isActive=true
+ */
+app.post('/api/clients/set-password', async (req, res) => {
+  const { token, password, confirmPassword } = req.body;
+  if (!token || !password || !confirmPassword) {
+    return res.status(400).json({ error: 'All fields required.' });
+  }
+  if (password !== confirmPassword) {
+    return res.status(400).json({ error: 'Passwords do not match.' });
+  }
+
+  try {
+    await dbConnect();
+    const client = await Client.findOne({ inviteToken: token });
+    if (!client) {
+      return res.status(404).json({ error: 'Invalid or expired token.' });
+    }
+    // Set their chosen password, activate account, clear token
+    await client.setPassword(password);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Error in POST /api/clients/set-password:', err);
+    return res.status(500).json({ error: 'Server error.' });
+  }
+});
 
 //
 // ─── KNOWLEDGE BANK ENDPOINTS ─────────────────────────────────────────────────
 //
 
-/**
- * POST /api/knowledge
- * Upload a new background document.
- * • Requires Basic Auth = “admin:pass”
- * • multipart/form-data field “doc” + optional “name”
- */
 app.post(
   '/api/knowledge',
   requireAdmin,
@@ -120,11 +218,6 @@ app.post(
   }
 );
 
-/**
- * GET /api/knowledge
- * List all background documents.
- * • Requires Basic Auth = “admin:pass”
- */
 app.get('/api/knowledge', requireAdmin, async (req, res) => {
   try {
     await dbConnect();
@@ -136,11 +229,6 @@ app.get('/api/knowledge', requireAdmin, async (req, res) => {
   }
 });
 
-/**
- * DELETE /api/knowledge/:id
- * Delete a background document by ID.
- * • Requires Basic Auth = “admin:pass”
- */
 app.delete('/api/knowledge/:id', requireAdmin, async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -152,7 +240,6 @@ app.delete('/api/knowledge/:id', requireAdmin, async (req, res) => {
     if (!doc) {
       return res.status(404).json({ error: 'Document not found.' });
     }
-    // Delete the file from disk if present
     const localFilePath = path.resolve(__dirname, doc.fileUrl.replace(/^\//, ''));
     try {
       await fs.unlink(localFilePath);
@@ -176,6 +263,7 @@ app.delete('/api/knowledge/:id', requireAdmin, async (req, res) => {
  * Create a new client.
  * • Requires Basic Auth = “admin:pass”
  * • multipart/form-data: fields “firstName, lastName, email, gender, dateOfBirth, background” + optional file under “file”
+ * After creating the client, we generate an inviteToken, save it, and send the “set-password” email.
  */
 app.post(
   '/api/clients',
@@ -219,6 +307,40 @@ app.post(
 
       await dbConnect();
       const created = await Client.create(newClientData);
+
+      // ─── Generate an inviteToken and save it ───────────────────────────────
+      const randomToken = crypto.randomBytes(32).toString('hex');
+      created.inviteToken = randomToken;
+      await created.save();
+
+      // ─── Send the “set password” email ─────────────────────────────────────
+      const setPasswordUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/set-password?token=${randomToken}`;
+      const mailOptions = {
+        from: process.env.EMAIL_FROM,
+        to: created.email,
+        subject: 'Welcome! Please set your password',
+        text: `
+Hi ${created.firstName},
+
+An account was created for you on JourneyGen. Please click the link below to choose your password and activate your account:
+
+${setPasswordUrl}
+
+If you did not expect this, you can ignore this email.
+
+Thanks,
+The JourneyGen Team
+        `
+      };
+
+      transporter.sendMail(mailOptions, (err, info) => {
+        if (err) {
+          console.error('Error sending invite email:', err);
+        } else {
+          console.log('Invite email sent:', info.response);
+        }
+      });
+
       return res.status(201).json(created);
     } catch (err) {
       console.error('Error in POST /api/clients:', err);
@@ -227,11 +349,6 @@ app.post(
   }
 );
 
-/**
- * GET /api/clients
- * List all clients.
- * • Requires Basic Auth = “admin:pass”
- */
 app.get('/api/clients', requireAdmin, async (req, res) => {
   try {
     await dbConnect();
@@ -243,11 +360,6 @@ app.get('/api/clients', requireAdmin, async (req, res) => {
   }
 });
 
-/**
- * GET /api/clients/:id
- * Fetch a single client by ID.
- * • Requires Basic Auth = “admin:pass”
- */
 app.get('/api/clients/:id', requireAdmin, async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -266,12 +378,6 @@ app.get('/api/clients/:id', requireAdmin, async (req, res) => {
   }
 });
 
-/**
- * PUT /api/clients/:id
- * Update a client by ID.
- * • Requires Basic Auth = “admin:pass”
- * • JSON body may contain fields to update (file upload has separate route)
- */
 app.put('/api/clients/:id', requireAdmin, async (req, res) => {
   const { id } = req.params;
   const updates = req.body;
@@ -292,11 +398,6 @@ app.put('/api/clients/:id', requireAdmin, async (req, res) => {
   }
 });
 
-/**
- * DELETE /api/clients/:id
- * Remove a client by ID.
- * • Requires Basic Auth = “admin:pass”
- */
 app.delete('/api/clients/:id', requireAdmin, async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -316,11 +417,6 @@ app.delete('/api/clients/:id', requireAdmin, async (req, res) => {
 // ─── JOURNAL ENDPOINTS ─────────────────────────────────────────────────────────
 //
 
-/**
- * GET /api/journals
- * List all journals owned by the admin user.
- * • Requires Basic Auth = “admin:pass”
- */
 app.get('/api/journals', requireAdmin, async (req, res) => {
   try {
     await dbConnect();
@@ -338,12 +434,6 @@ app.get('/api/journals', requireAdmin, async (req, res) => {
   }
 });
 
-/**
- * POST /api/journals
- * Create a new journal.
- * • Requires Basic Auth = “admin:pass”
- * • JSON body: { topic, background, bookingLink, clientId }
- */
 app.post('/api/journals', requireAdmin, async (req, res) => {
   const { topic, background, bookingLink, clientId } = req.body;
 
@@ -362,19 +452,16 @@ app.post('/api/journals', requireAdmin, async (req, res) => {
 
   try {
     await dbConnect();
-    // Verify client exists
     const client = await Client.findById(clientId).lean();
     if (!client) {
       return res.status(404).json({ error: 'Client not found.' });
     }
 
-    // Get admin user’s _id
     const adminUser = await User.findOne({ username: 'admin' });
     if (!adminUser) {
       return res.status(500).json({ error: 'Admin user missing.' });
     }
 
-    // Delegate to generateJournalService (saves a Journal without bookingLink)
     const savedJournal = await generateJournal({
       topic,
       backgroundText: background || '',
@@ -383,7 +470,6 @@ app.post('/api/journals', requireAdmin, async (req, res) => {
       clientId: client._id.toString()
     });
 
-    // Update that saved journal to set bookingLink
     const updated = await Journal.findByIdAndUpdate(
       savedJournal._id,
       { bookingLink: bookingLink || '' },
@@ -397,12 +483,6 @@ app.post('/api/journals', requireAdmin, async (req, res) => {
   }
 });
 
-/**
- * GET /api/journals/:id
- * Fetch one journal by ID.
- * - ADMIN (username="admin", password="pass") can fetch any journal.
- * - CLIENT (email:pass) can fetch only if journal.clientId === their client._id.
- */
 app.get('/api/journals/:id', async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -416,7 +496,7 @@ app.get('/api/journals/:id', async (req, res) => {
 
   let decoded;
   try {
-    decoded = Buffer.from(auth.split(' ')[1], 'base64').toString(); // e.g. "admin:pass" or "user@…:pass"
+    decoded = Buffer.from(auth.split(' ')[1], 'base64').toString();
   } catch {
     return res.status(401).json({ error: 'Invalid Authorization header' });
   }
@@ -425,7 +505,7 @@ app.get('/api/journals/:id', async (req, res) => {
   try {
     await dbConnect();
 
-    // 1) ADMIN case:
+    // 1) ADMIN
     if (username === 'admin' && password === 'pass') {
       const journal = await Journal.findById(id).lean();
       if (!journal) {
@@ -434,16 +514,22 @@ app.get('/api/journals/:id', async (req, res) => {
       return res.json(journal);
     }
 
-    // 2) CLIENT case:
-    if (!username.includes('@') || password !== 'pass') {
+    // 2) CLIENT
+    if (!username.includes('@')) {
       return res.status(403).json({ error: 'Invalid credentials' });
     }
-    const client = await Client.findOne({ email: username.trim() }).lean();
+    const client = await Client.findOne({ email: username.trim() });
     if (!client) {
       return res.status(404).json({ error: 'Client not found.' });
     }
+    if (!client.isActive) {
+      return res.status(403).json({ error: 'Account not activated.' });
+    }
+    const ok = await client.checkPassword(password);
+    if (!ok) {
+      return res.status(403).json({ error: 'Invalid password.' });
+    }
 
-    // 3) Only allow fetch if journal.clientId matches this client’s ID
     const journal = await Journal.findById(id).lean();
     if (!journal) {
       return res.status(404).json({ error: 'Journal not found.' });
@@ -458,12 +544,75 @@ app.get('/api/journals/:id', async (req, res) => {
   }
 });
 
-/**
- * GET /api/journals/client/:clientId
- * List all journals for a given client.
- * - ADMIN (admin:pass) can list any client’s journals.
- * - CLIENT (email:pass) can list only their own journals.
- */
+app.put('/api/journals/:id/responses', async (req, res) => {
+  const { id } = req.params;
+  const { responses } = req.body;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ error: 'Invalid journal ID.' });
+  }
+  if (!Array.isArray(responses)) {
+    return res.status(400).json({ error: 'Missing or invalid "responses" array.' });
+  }
+
+  const auth = req.headers.authorization || '';
+  if (!auth.startsWith('Basic ')) {
+    return res.status(401).json({ error: 'Missing Authorization header' });
+  }
+
+  let decoded;
+  try {
+    decoded = Buffer.from(auth.split(' ')[1], 'base64').toString();
+  } catch {
+    return res.status(401).json({ error: 'Invalid Authorization header' });
+  }
+  const [username, password] = decoded.split(':');
+
+  try {
+    await dbConnect();
+
+    // 1) ADMIN
+    if (username === 'admin' && password === 'pass') {
+      const updated = await Journal.findByIdAndUpdate(
+        id,
+        { responses },
+        { new: true }
+      ).lean();
+      if (!updated) {
+        return res.status(404).json({ error: 'Journal not found.' });
+      }
+      return res.json({ success: true });
+    }
+
+    // 2) CLIENT
+    if (!username.includes('@')) {
+      return res.status(403).json({ error: 'Invalid credentials' });
+    }
+    const client = await Client.findOne({ email: username.trim() });
+    if (!client || !client.isActive) {
+      return res.status(404).json({ error: 'Client not found or inactive.' });
+    }
+    const ok = await client.checkPassword(password);
+    if (!ok) {
+      return res.status(403).json({ error: 'Invalid password.' });
+    }
+
+    const journal = await Journal.findById(id).lean();
+    if (!journal) {
+      return res.status(404).json({ error: 'Journal not found.' });
+    }
+    if (journal.clientId.toString() !== client._id.toString()) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    await Journal.findByIdAndUpdate(id, { responses });
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Error in PUT /api/journals/:id/responses:', err);
+    return res.status(500).json({ error: 'Server error saving responses.' });
+  }
+});
+
 app.get('/api/journals/client/:clientId', async (req, res) => {
   const { clientId } = req.params;
   if (!mongoose.Types.ObjectId.isValid(clientId)) {
@@ -477,7 +626,7 @@ app.get('/api/journals/client/:clientId', async (req, res) => {
 
   let decoded;
   try {
-    decoded = Buffer.from(auth.split(' ')[1], 'base64').toString(); // "admin:pass" or "user@…:pass"
+    decoded = Buffer.from(auth.split(' ')[1], 'base64').toString();
   } catch {
     return res.status(401).json({ error: 'Invalid Authorization header' });
   }
@@ -486,19 +635,23 @@ app.get('/api/journals/client/:clientId', async (req, res) => {
   try {
     await dbConnect();
 
-    // 1) ADMIN: can list any client’s journals
+    // 1) ADMIN
     if (username === 'admin' && password === 'pass') {
       const userJournals = await Journal.find({ clientId }).sort({ createdAt: -1 }).lean();
       return res.json(userJournals);
     }
 
-    // 2) CLIENT: can only list if auth’s email matches that clientId
-    if (!username.includes('@') || password !== 'pass') {
+    // 2) CLIENT
+    if (!username.includes('@')) {
       return res.status(403).json({ error: 'Invalid credentials' });
     }
-    const client = await Client.findOne({ email: username.trim() }).lean();
-    if (!client) {
-      return res.status(404).json({ error: 'Client not found.' });
+    const client = await Client.findOne({ email: username.trim() });
+    if (!client || !client.isActive) {
+      return res.status(404).json({ error: 'Client not found or inactive.' });
+    }
+    const ok = await client.checkPassword(password);
+    if (!ok) {
+      return res.status(403).json({ error: 'Invalid password.' });
     }
     if (client._id.toString() !== clientId) {
       return res.status(403).json({ error: 'Forbidden' });
@@ -512,12 +665,6 @@ app.get('/api/journals/client/:clientId', async (req, res) => {
   }
 });
 
-/**
- * POST /api/journals/:id/report
- * Generate a “report” given user’s responses.
- * - ADMIN (admin:pass) may generate a report on any journal.
- * - CLIENT (email:pass) may generate only on their own journal.
- */
 app.post('/api/journals/:id/report', async (req, res) => {
   const { id } = req.params;
   const { responses } = req.body;
@@ -545,38 +692,38 @@ app.post('/api/journals/:id/report', async (req, res) => {
   try {
     await dbConnect();
 
-    // 1) ADMIN: allowed on any journal
-    if (username === 'admin' && password === 'pass') {
-      // proceed to GPT
-    } else {
-      // 2) CLIENT: must match journal.clientId
-      if (!username.includes('@') || password !== 'pass') {
+    // 1) ADMIN
+    let journal = await Journal.findById(id).lean();
+    if (!journal) {
+      return res.status(404).json({ error: 'Journal not found.' });
+    }
+    if (!(username === 'admin' && password === 'pass')) {
+      // 2) CLIENT
+      if (!username.includes('@')) {
         return res.status(403).json({ error: 'Invalid credentials' });
       }
-      const client = await Client.findOne({ email: username.trim() }).lean();
-      if (!client) {
-        return res.status(404).json({ error: 'Client not found.' });
+      const client = await Client.findOne({ email: username.trim() });
+      if (!client || !client.isActive) {
+        return res.status(404).json({ error: 'Client not found or inactive.' });
       }
-
-      const journal = await Journal.findById(id).lean();
-      if (!journal) {
-        return res.status(404).json({ error: 'Journal not found.' });
+      const ok = await client.checkPassword(password);
+      if (!ok) {
+        return res.status(403).json({ error: 'Invalid password.' });
       }
       if (journal.clientId.toString() !== client._id.toString()) {
         return res.status(403).json({ error: 'Forbidden' });
       }
-      // allowed — fall through to GPT portion
     }
 
     // ─── Build the GPT prompt with Knowledge Bank + Client info ──────────────
 
-    // 1) Fetch the journal again (to ensure we have it)
-    const journal = await Journal.findById(id).lean();
+    // 1) Fetch the journal again
+    journal = await Journal.findById(id).lean();
     if (!journal) {
       return res.status(404).json({ error: 'Journal not found.' });
     }
 
-    // 2) Fetch the client record (to get name + background)
+    // 2) Fetch the client record
     const client = await Client.findById(journal.clientId).lean();
     if (!client) {
       return res.status(404).json({ error: 'Client not found.' });
@@ -584,24 +731,20 @@ app.post('/api/journals/:id/report', async (req, res) => {
     const clientName = `${client.firstName} ${client.lastName}`;
     const clientBackground = client.background || '';
 
-    // 3) Load all KnowledgeDoc entries from MongoDB
+    // 3) Load all KnowledgeDoc entries
     const allDocs = await KnowledgeDoc.find().sort({ uploadedAt: -1 }).lean();
     let knowledgeBankText = '';
     const MAX_PER_DOC_CHARS = 2000;
 
     for (const doc of allDocs) {
       try {
-        // fileUrl is stored like "/uploads/1234567890-someFile.txt"
         const rawPath = doc.fileUrl.replace(/^\//, '');
         const diskPath = path.resolve(
           path.dirname(fileURLToPath(import.meta.url)),
           '..',
           rawPath
         );
-
         let text = await fs.readFile(diskPath, 'utf-8');
-        console.log(`→ Reading KnowledgeDoc from disk: ${diskPath} (length ${text.length} chars)`);
-
         if (text.length > MAX_PER_DOC_CHARS) {
           text = text.slice(0, MAX_PER_DOC_CHARS) + '\n\n[...truncated]';
         }
@@ -612,7 +755,7 @@ app.post('/api/journals/:id/report', async (req, res) => {
       }
     }
 
-    // 4) Fallback to static Background.txt if no KnowledgeDocs found
+    // 4) Fallback background if needed
     let fallbackBackground = '';
     if (!knowledgeBankText.trim()) {
       try {
@@ -626,25 +769,22 @@ app.post('/api/journals/:id/report', async (req, res) => {
       }
     }
 
-    // 5) Build the “system” prompt
+    // 5) Build system prompt
     let systemPrompt = '';
     if (knowledgeBankText.trim()) {
       systemPrompt += `Knowledge Bank Documents:${knowledgeBankText}\n\n`;
     } else if (fallbackBackground.trim()) {
       systemPrompt += fallbackBackground + '\n\n';
     }
-
-    // 6) Inject the client’s information
     systemPrompt += `Client Name: ${clientName}\n`;
     if (clientBackground.trim()) {
       systemPrompt += `Client Background: ${clientBackground.trim()}\n\n`;
     }
-
     systemPrompt += `
 You are a coach’s assistant using the Holy Sim framework. Based on the guided journal below (which was created specifically for ${clientName}), generate a personalized report with suggestions, insights, and next steps for the user. Include any relevant context from the knowledge bank and the client’s background in your response.
 `.trim() + '\n\n';
 
-    // 7) Append the journal’s sections and user answers
+    // 6) Append journal sections + user answers
     let promptText = systemPrompt;
     promptText += `Journal Title: ${journal.title}\n`;
     promptText += `Journal Description: ${journal.description}\n\n`;
@@ -667,7 +807,7 @@ You are a coach’s assistant using the Holy Sim framework. Based on the guided 
 
     promptText += `---\nNow provide a cohesive report for ${clientName}: highlight strengths, offer constructive feedback, and suggest next steps based on their background and their responses.\n\nReport:\n`;
 
-    // 8) Call OpenAI
+    // 7) Call OpenAI
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1',

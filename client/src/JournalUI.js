@@ -1,6 +1,6 @@
 // client/src/JournalUI.js
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import jsPDF from 'jspdf';
 
 export default function JournalUI({ journalId, apiUrl }) {
@@ -12,7 +12,10 @@ export default function JournalUI({ journalId, apiUrl }) {
   const [reportError, setReportError] = useState(null);
   const [loadError, setLoadError] = useState(null);
 
-  // 1) Fetch journal on mount
+  // Keep a ref of “lastSaved” so we only autosave when something changed
+  const lastSavedRef = useRef([]);
+
+  // 1) Fetch journal + any saved responses on mount
   useEffect(() => {
     setJournal(null);
     setLoadError(null);
@@ -34,11 +37,21 @@ export default function JournalUI({ journalId, apiUrl }) {
       })
       .then((data) => {
         setJournal(data);
-        // Initialize one empty string per prompt
-        const initial = data.tableOfContents.map((section) =>
-          section.prompts.map(() => '')
-        );
-        setResponses(initial);
+
+        // If the journal already has `responses` saved, use that. Otherwise initialize blanks.
+        if (
+          Array.isArray(data.responses) &&
+          data.responses.length === data.tableOfContents.length
+        ) {
+          setResponses(data.responses);
+          lastSavedRef.current = data.responses;
+        } else {
+          const initial = data.tableOfContents.map((section) =>
+            section.prompts.map(() => '')
+          );
+          setResponses(initial);
+          lastSavedRef.current = initial;
+        }
       })
       .catch((err) => {
         console.error(err);
@@ -46,6 +59,7 @@ export default function JournalUI({ journalId, apiUrl }) {
       });
   }, [journalId, apiUrl]);
 
+  // 2) Handler for whenever a prompt changes
   const handlePromptChange = (secIdx, promptIdx, text) => {
     setResponses((prev) => {
       const copy = prev.map((arr) => [...arr]);
@@ -54,7 +68,59 @@ export default function JournalUI({ journalId, apiUrl }) {
     });
   };
 
-  // 2) Submit responses → generate a report
+  // 3) Autosave every 10 seconds if `responses` changed since last save
+  useEffect(() => {
+    if (!journal) return;
+
+    const interval = setInterval(() => {
+      // Compare `responses` to `lastSavedRef.current`
+      const flatNew = responses.flat();
+      const flatOld = lastSavedRef.current.flat();
+      let changed = false;
+      if (flatNew.length !== flatOld.length) {
+        changed = true;
+      } else {
+        for (let i = 0; i < flatNew.length; i++) {
+          if (flatNew[i] !== flatOld[i]) {
+            changed = true;
+            break;
+          }
+        }
+      }
+
+      if (changed) {
+        // Send PUT /api/journals/:id/responses
+        const token = localStorage.getItem('clientToken');
+        fetch(`${apiUrl}/api/journals/${journalId}/responses`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer ' + token
+          },
+          body: JSON.stringify({ responses })
+        })
+          .then((res) => {
+            if (!res.ok) {
+              console.warn(
+                'Auto‐save failed:',
+                res.status,
+                '–',
+                res.statusText
+              );
+            } else {
+              lastSavedRef.current = JSON.parse(JSON.stringify(responses));
+            }
+          })
+          .catch((err) => {
+            console.warn('Auto‐save network error:', err);
+          });
+      }
+    }, 10_000); // every 10 seconds
+
+    return () => clearInterval(interval);
+  }, [journal, responses, apiUrl, journalId]);
+
+  // 4) Submit responses → generate a permanent report
   const handleSubmit = () => {
     if (!journal) return;
     setLoadingReport(true);
@@ -91,7 +157,7 @@ export default function JournalUI({ journalId, apiUrl }) {
       });
   };
 
-  // 3) Render loading / error states first
+  // 5) Render loading / error states first
   if (loadError) {
     return (
       <div style={{ padding: '2rem', color: 'red', textAlign: 'center' }}>
@@ -107,7 +173,7 @@ export default function JournalUI({ journalId, apiUrl }) {
     );
   }
 
-  // 4) Journal & report loaded; now build the “Overview / Sections / Report” UI
+  // 6) Journal & report loaded; build the “Overview / Sections / Report” UI
   const numSections = journal.tableOfContents.length;
   const isOverview = currentIndex === 0;
   const isReport = report && currentIndex === numSections + 1;
